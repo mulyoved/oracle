@@ -66,7 +66,7 @@ ${dim(' •')} This CLI is tuned for tough questions. Attach source files for be
 ${dim(' •')} The model has no built-in knowledge of your project—start each run with a sentence or two about the architecture, key components, and why you’re asking the question if that context matters.
 ${dim(' •')} Run ${bold('--files-report')} to see per-file token impact before spending money.
 ${dim(' •')} Non-preview runs spawn detached sessions so requests keep running even if your terminal closes.
-${dim(' •')} GPT-5 Pro exposes \"reasoning\" content. It is shown automatically on rich TTYs (dimmed) but you can force it on/off via --show-reasoning.`);
+${dim(' •')} GPT-5 Pro exposes "reasoning" content. It is shown automatically on rich TTYs (dimmed) but you can force it on/off via --show-reasoning.
 
 ${bold('Examples')}
 ${bold('  oracle')} --prompt "Summarize risks" --file docs/risk.md --files-report --preview
@@ -107,9 +107,11 @@ function validateModel(value) {
 }
 
 async function main() {
+  const rawArgs = process.argv.slice(2);
   const options = program.parse(process.argv).opts();
 
-  if (process.argv.length <= 2) {
+  if (rawArgs.length === 0) {
+    console.log(chalk.yellow('No prompt or subcommand supplied. See `oracle --help` for usage.'));
     program.help({ error: false });
     return;
   }
