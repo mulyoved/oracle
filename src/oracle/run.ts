@@ -59,8 +59,8 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   const maskApiKey = (key: string | undefined | null): string | null => {
     if (!key) return null;
     if (key.length <= 8) return `${key[0] ?? ''}***${key[key.length - 1] ?? ''}`;
-    const prefix = key.slice(0, 6);
-    const suffix = key.slice(-6);
+    const prefix = key.slice(0, 4);
+    const suffix = key.slice(-4);
     return `${prefix}****${suffix}`;
   };
 
@@ -129,7 +129,11 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   logVerbose(`Estimated tokens (prompt + files): ${estimatedInputTokens.toLocaleString()}`);
   const fileCount = files.length;
   const cliVersion = getCliVersion();
-  const headerLine = `Oracle (${cliVersion}) consulting ${modelConfig.model}'s crystal ball with ${estimatedInputTokens.toLocaleString()} tokens and ${fileCount} files...`;
+  const richTty = process.stdout.isTTY && chalk.level > 0;
+  const headerModelLabel = richTty ? chalk.cyan(modelConfig.model) : modelConfig.model;
+  const tokenLabel = richTty ? chalk.green(estimatedInputTokens.toLocaleString()) : estimatedInputTokens.toLocaleString();
+  const fileLabel = richTty ? chalk.magenta(fileCount.toString()) : fileCount.toString();
+  const headerLine = `Oracle (${cliVersion}) consulting ${headerModelLabel}'s crystal ball with ${tokenLabel} tokens and ${fileLabel} files...`;
   const shouldReportFiles =
     (options.filesReport || fileTokenInfo.totalTokens > inputTokenBudget) && fileTokenInfo.stats.length > 0;
   if (!isPreview) {

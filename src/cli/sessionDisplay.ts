@@ -81,7 +81,6 @@ export async function attachSession(sessionId: string, options?: AttachSessionOp
   }
   const initialStatus = metadata.status;
   if (!options?.suppressMetadata) {
-    console.log(chalk.bold(`Session: ${sessionId}`));
     const reattachLine = buildReattachLine(metadata);
     if (reattachLine) {
       console.log(chalk.blue(reattachLine));
