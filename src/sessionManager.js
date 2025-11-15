@@ -15,16 +15,29 @@ export async function ensureSessionStorage() {
   await ensureDir(SESSIONS_DIR);
 }
 
-function slugify(text) {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 24) || 'session';
+function slugify(text, maxLength = 32) {
+  const words = text.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  if (words.length === 0) {
+    return 'session';
+  }
+  const parts = [];
+  let length = 0;
+  for (const word of words) {
+    const projected = length === 0 ? word.length : length + 1 + word.length;
+    if (projected > maxLength) {
+      if (parts.length === 0) {
+        parts.push(word.slice(0, maxLength));
+      }
+      break;
+    }
+    parts.push(word);
+    length = projected;
+  }
+  return parts.join('-') || 'session';
 }
 
 export function createSessionId(prompt) {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const timestamp = new Date().toISOString().replace(/\..*/, '').replace('T', '-').replace(/:/g, '-');
   const slug = slugify(prompt);
   return `${timestamp}-${slug}`;
 }
@@ -145,6 +158,42 @@ export async function readSessionLog(sessionId) {
   } catch {
     return '';
   }
+}
+
+export async function deleteSessionsOlderThan({ hours = 24, includeAll = false } = {}) {
+  await ensureSessionStorage();
+  const entries = await fs.readdir(SESSIONS_DIR).catch(() => []);
+  if (!entries.length) {
+    return { deleted: 0 };
+  }
+  const cutoff = includeAll ? Number.NEGATIVE_INFINITY : Date.now() - hours * 60 * 60 * 1000;
+  let deleted = 0;
+
+  for (const entry of entries) {
+    const dir = sessionDir(entry);
+    let createdMs;
+    const meta = await readSessionMetadata(entry);
+    if (meta?.createdAt) {
+      const parsed = Date.parse(meta.createdAt);
+      if (!Number.isNaN(parsed)) {
+        createdMs = parsed;
+      }
+    }
+    if (createdMs == null) {
+      try {
+        const stats = await fs.stat(dir);
+        createdMs = stats.birthtimeMs || stats.mtimeMs;
+      } catch {
+        continue;
+      }
+    }
+    if (includeAll || (createdMs != null && createdMs < cutoff)) {
+      await fs.rm(dir, { recursive: true, force: true });
+      deleted += 1;
+    }
+  }
+
+  return { deleted };
 }
 
 export async function wait(ms) {

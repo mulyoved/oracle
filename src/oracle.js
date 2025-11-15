@@ -276,6 +276,16 @@ export async function runOracle(options, deps = {}) {
     client = deps.client,
   } = deps;
 
+  const allowedPreviewModes = new Set(['summary', 'json', 'full']);
+  const previewSource = options.previewMode ?? options.preview;
+  let previewMode;
+  if (typeof previewSource === 'string' && previewSource.length > 0) {
+    previewMode = allowedPreviewModes.has(previewSource) ? previewSource : 'summary';
+  } else if (previewSource) {
+    previewMode = 'summary';
+  }
+  const isPreview = Boolean(previewMode);
+
   if (!apiKey) {
     throw new Error('Missing OPENAI_API_KEY. Set it via the environment or a .env file.');
   }
@@ -304,14 +314,12 @@ export async function runOracle(options, deps = {}) {
   const fileCount = files.length;
   const headerLine = `Oracle (${pkg.version}) consulting ${modelConfig.model}'s crystal ball with ${estimatedInputTokens.toLocaleString()} tokens and ${fileCount} files...`;
 
-  if (!options.preview) {
+  if (!isPreview) {
     log(headerLine);
     if (options.model === 'gpt-5-pro') {
       log(dim('Pro is thinking, this can take up to 10 minutes...'));
     }
-    if (options.sessionId) {
-      log(`Session ID: ${options.sessionId}`);
-    }
+    log(dim('Press Ctrl+C to cancel.'));
   }
   const shouldReportFiles =
     (options.filesReport || fileTokenInfo.totalTokens > inputTokenBudget) &&
@@ -334,10 +342,15 @@ export async function runOracle(options, deps = {}) {
     maxOutputTokens: options.maxOutput,
   });
 
-  if (options.preview) {
-    if (options.previewJson) {
+  if (previewMode) {
+    if (previewMode === 'json' || previewMode === 'full') {
       log(chalk.bold('Request JSON'));
       log(JSON.stringify(requestBody, null, 2));
+      log('');
+    }
+    if (previewMode === 'full') {
+      log(chalk.bold('Assembled Prompt'));
+      log(userPrompt);
       log('');
     }
     log(
@@ -345,6 +358,7 @@ export async function runOracle(options, deps = {}) {
     );
     return {
       mode: 'preview',
+      previewMode,
       requestBody,
       estimatedInputTokens,
       inputTokenBudget,
@@ -357,14 +371,6 @@ export async function runOracle(options, deps = {}) {
   const stream = await openAiClient.responses.stream(requestBody);
 
   let sawTextDelta = false;
-  const reasoningMode = options.showReasoning ?? 'auto';
-  const reasoningLog = options.reasoningLog ?? ((text) => log(dim(text)));
-  const shouldRenderReasoning = (mode) => {
-    if (mode === 'off') return false;
-    if (mode === 'on') return true;
-    return options.model === 'gpt-5-pro' && isTty;
-  };
-  const renderReasoning = shouldRenderReasoning(reasoningMode);
 
   let answerHeaderPrinted = false;
   const ensureAnswerHeader = () => {
@@ -376,9 +382,7 @@ export async function runOracle(options, deps = {}) {
 
   try {
     for await (const event of stream) {
-      if (renderReasoning && event.type === 'response.reasoning.delta') {
-        reasoningLog(event.delta);
-      } else if (event.type === 'response.output_text.delta') {
+      if (event.type === 'response.output_text.delta') {
         sawTextDelta = true;
         ensureAnswerHeader();
         if (!options.silent) {
@@ -403,6 +407,7 @@ export async function runOracle(options, deps = {}) {
 
   const answerText = extractTextOutput(response);
   if (!options.silent) {
+    // biome-ignore lint/nursery/noUnnecessaryConditions: flag flips when streaming text arrives
     if (sawTextDelta) {
       write('\n\n');
     } else {
@@ -442,7 +447,7 @@ export async function runOracle(options, deps = {}) {
   if (files.length > 0) {
     statsParts.push(`files=${files.length}`);
   }
-  log(`Finished in ${elapsedDisplay} (${statsParts.join(' | ')})`);
+  log(chalk.blue(`Finished in ${elapsedDisplay} (${statsParts.join(' | ')})`));
 
   return {
     mode: 'live',

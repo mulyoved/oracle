@@ -3,12 +3,21 @@ import 'dotenv/config';
 import { Command, InvalidArgumentError, Option } from 'commander';
 import chalk from 'chalk';
 import kleur from 'kleur';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { ensureSessionStorage, initializeSession, updateSessionMetadata, readSessionMetadata, listSessionsMetadata, filterSessionsByRange, createSessionLogWriter, readSessionLog, wait, SESSIONS_DIR } from '../src/sessionManager.js';
+import {
+  ensureSessionStorage,
+  initializeSession,
+  updateSessionMetadata,
+  readSessionMetadata,
+  listSessionsMetadata,
+  filterSessionsByRange,
+  createSessionLogWriter,
+  readSessionLog,
+  wait,
+  SESSIONS_DIR,
+  deleteSessionsOlderThan,
+} from '../src/sessionManager.js';
 import { runOracle, MODEL_CONFIGS, parseIntOption, renderPromptMarkdown } from '../src/oracle.js';
 
-const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const VERSION = '1.0.0';
 
 
@@ -18,13 +27,15 @@ program
   .description('One-shot GPT-5 Pro / GPT-5.1 tool for hard questions that benefit from large file context and server-side search.')
   .version(VERSION)
   .option('-p, --prompt <text>', 'User prompt to send to the model.')
-  .option('-f, --file <paths...>', 'Paths to files or directories to append to the prompt; repeat or supply a space-separated list.', collectPaths, [])
+  .option('-f, --file <paths...>', 'Paths to files or directories to append to the prompt; repeat, comma-separate, or supply a space-separated list.', collectPaths, [])
   .option('-m, --model <model>', 'Model to target (gpt-5-pro | gpt-5.1).', validateModel, 'gpt-5-pro')
   .option('--files-report', 'Show token usage per attached file (also prints automatically when files exceed the token budget).', false)
-  .option('--preview', 'Preview the request and token usage without making an API call.', false)
-  .option('--preview-json', 'When using --preview, also dump the full JSON payload.', false)
+  .addOption(
+    new Option('--preview [mode]', 'Preview the request without calling the API (summary | json | full).')
+      .choices(['summary', 'json', 'full'])
+      .preset('summary'),
+  )
   .addOption(new Option('--exec-session <id>').hideHelp())
-.option('--show-reasoning [mode]', 'Control reasoning output (auto | on | off).', 'auto')
   .option('--render-markdown', 'Emit the assembled markdown bundle for prompt + files and exit.', false)
   .showHelpAfterError('(use --help for usage)');
 
@@ -36,20 +47,43 @@ program
   .option('--all', 'Include all stored sessions regardless of age.', false)
   .action(async (sessionId, cmd) => {
     if (!sessionId) {
-      await showStatus({ hours: cmd.all ? Infinity : cmd.hours, includeAll: cmd.all, limit: cmd.limit });
+      const showExamples = usesDefaultStatusFilters(cmd);
+      await showStatus({
+        hours: cmd.all ? Infinity : cmd.hours,
+        includeAll: cmd.all,
+        limit: cmd.limit,
+        showExamples,
+      });
       return;
     }
     await attachSession(sessionId);
   });
 
-program
+const statusCommand = program
   .command('status')
   .description('List recent sessions (24h window by default).')
   .option('--hours <hours>', 'Look back this many hours (default 24).', parseFloatOption, 24)
   .option('--limit <count>', 'Maximum sessions to show (max 1000).', parseIntOption, 100)
   .option('--all', 'Include all stored sessions regardless of age.', false)
   .action(async (cmd) => {
-    await showStatus({ hours: cmd.all ? Infinity : cmd.hours, includeAll: cmd.all, limit: cmd.limit });
+    const showExamples = usesDefaultStatusFilters(cmd);
+    await showStatus({
+      hours: cmd.all ? Infinity : cmd.hours,
+      includeAll: cmd.all,
+      limit: cmd.limit,
+      showExamples,
+    });
+  });
+
+statusCommand
+  .command('clear')
+  .description('Delete stored sessions older than the provided window (24h default).')
+  .option('--hours <hours>', 'Delete sessions older than this many hours (default 24).', parseFloatOption, 24)
+  .option('--all', 'Delete all stored sessions.', false)
+  .action(async (cmd) => {
+    const result = await deleteSessionsOlderThan({ hours: cmd.hours, includeAll: cmd.all });
+    const scope = cmd.all ? 'all stored sessions' : `sessions older than ${cmd.hours}h`;
+    console.log(`Deleted ${result.deleted} ${result.deleted === 1 ? 'session' : 'sessions'} (${scope}).`);
   });
 
 const isTty = process.stdout.isTTY;
@@ -65,14 +99,13 @@ ${dim(' •')} This CLI is tuned for tough questions. Attach source files for be
 ${dim(' •')} The model has no built-in knowledge of your project—start each run with a sentence or two about the architecture, key components, and why you’re asking the question if that context matters.
 ${dim(' •')} Run ${bold('--files-report')} to see per-file token impact before spending money.
 ${dim(' •')} Non-preview runs spawn detached sessions so requests keep running even if your terminal closes.
-${dim(' •')} GPT-5 Pro exposes "reasoning" content. It is shown automatically on rich TTYs (dimmed) but you can force it on/off via --show-reasoning.
 
 ${bold('Examples')}
 ${bold('  oracle')} --prompt "Summarize risks" --file docs/risk.md --files-report --preview
 ${dim('    Inspect tokens + files without calling the API.')}
 
-${bold('  oracle')} --prompt "Explain bug" --file src/ --files-report
-${dim('    Launch background session and note the printed Session ID.')}
+${bold('  oracle')} --prompt "Explain bug" --file src/,docs/crash.log --files-report
+${dim('    Attach both the src/ directory and docs/crash.log, launch a background session, and note the printed Session ID.')}
 
 ${bold('  oracle status')} --hours 72 --limit 50
 ${dim('    Show sessions from the last 72h (capped at 50 entries).')}
@@ -105,9 +138,27 @@ function validateModel(value) {
   return value;
 }
 
-async function main() {
-  const rawArgs = process.argv.slice(2);
-  const options = program.parse(process.argv).opts();
+function usesDefaultStatusFilters(cmd) {
+  const hoursSource = cmd.getOptionValueSource?.('hours') ?? 'default';
+  const limitSource = cmd.getOptionValueSource?.('limit') ?? 'default';
+  const allSource = cmd.getOptionValueSource?.('all') ?? 'default';
+  return hoursSource === 'default' && limitSource === 'default' && allSource === 'default';
+}
+
+const rawArgs = process.argv.slice(2);
+
+function resolvePreviewMode(value) {
+  if (typeof value === 'string' && value.length > 0) {
+    return value;
+  }
+  if (value === true) {
+    return 'summary';
+  }
+  return undefined;
+}
+
+async function runRootCommand(options) {
+  const previewMode = resolvePreviewMode(options.preview);
 
   if (rawArgs.length === 0) {
     console.log(chalk.yellow('No prompt or subcommand supplied. See `oracle --help` for usage.'));
@@ -134,11 +185,14 @@ async function main() {
     return;
   }
 
-  if (options.preview) {
+  if (previewMode) {
     if (!options.prompt) {
       throw new Error('Prompt is required when using --preview.');
     }
-    await runOracle(options, { log: console.log, write: (chunk) => process.stdout.write(chunk) });
+    await runOracle(
+      { ...options, previewMode, preview: true },
+      { log: console.log, write: (chunk) => process.stdout.write(chunk) },
+    );
     return;
   }
 
@@ -148,18 +202,59 @@ async function main() {
 
   await ensureSessionStorage();
   const sessionMeta = await initializeSession(options, process.cwd());
-  spawnDetachedSession(sessionMeta.id);
-  console.log(chalk.bold(`Session ${sessionMeta.id} started`));
-  console.log(`Follow progress with: oracle session ${sessionMeta.id}`);
-  console.log('Use `oracle status` to review recent sessions.');
+  await runInteractiveSession(sessionMeta, options);
+  console.log(chalk.bold(`Session ${sessionMeta.id} completed`));
 }
 
-function spawnDetachedSession(sessionId) {
-  const child = spawn(process.execPath, [SCRIPT_PATH, '--exec-session', sessionId], {
-    detached: true,
-    stdio: 'ignore',
-  });
-  child.unref();
+async function runInteractiveSession(sessionMeta, options) {
+  const runOptions = {
+    ...options,
+    sessionId: sessionMeta.id,
+    preview: false,
+    previewMode: undefined,
+    file: options.file ?? [],
+  };
+  const { logLine, writeChunk, stream } = createSessionLogWriter(sessionMeta.id);
+  let headerAugmented = false;
+  const combinedLog = (message = '') => {
+    if (!headerAugmented && message.startsWith('Oracle (')) {
+      headerAugmented = true;
+      console.log(`${message}\n${chalk.blue(`Reattach via: oracle session ${sessionMeta.id}`)}`);
+      logLine(message);
+      logLine(`Reattach via: oracle session ${sessionMeta.id}`);
+      return;
+    }
+    console.log(message);
+    logLine(message);
+  };
+  const combinedWrite = (chunk) => {
+    writeChunk(chunk);
+    return process.stdout.write(chunk);
+  };
+  try {
+    await updateSessionMetadata(sessionMeta.id, { status: 'running', startedAt: new Date().toISOString() });
+    const result = await runOracle(runOptions, {
+      log: combinedLog,
+      write: combinedWrite,
+    });
+    await updateSessionMetadata(sessionMeta.id, {
+      status: 'completed',
+      completedAt: new Date().toISOString(),
+      usage: result.usage,
+      elapsedMs: result.elapsedMs,
+    });
+    return result;
+  } catch (error) {
+    combinedLog(`ERROR: ${error?.message ?? error}`);
+    await updateSessionMetadata(sessionMeta.id, {
+      status: 'error',
+      completedAt: new Date().toISOString(),
+      errorMessage: error?.message ?? String(error),
+    });
+    throw error;
+  } finally {
+    stream.end();
+  }
 }
 
 async function executeSession(sessionId) {
@@ -172,6 +267,7 @@ async function executeSession(sessionId) {
   const options = { ...metadata.options, sessionId }; // include sessionId for logging
   options.file = metadata.options.file ?? [];
   options.preview = false;
+  options.previewMode = undefined;
   options.silent = false;
   options.prompt = metadata.options.prompt;
   const { logLine, writeChunk, stream } = createSessionLogWriter(sessionId);
@@ -201,11 +297,14 @@ async function executeSession(sessionId) {
   }
 }
 
-async function showStatus({ hours, includeAll, limit }) {
+async function showStatus({ hours, includeAll, limit, showExamples = false }) {
   const metas = await listSessionsMetadata();
   const { entries, truncated, total } = filterSessionsByRange(metas, { hours, includeAll, limit });
   if (!entries.length) {
     console.log('No sessions found for the requested range.');
+    if (showExamples) {
+      printStatusExamples();
+    }
     return;
   }
   console.log(chalk.bold('Recent Sessions'));
@@ -218,10 +317,24 @@ async function showStatus({ hours, includeAll, limit }) {
   if (truncated) {
     console.log(
       chalk.yellow(
-        `Showing ${entries.length} of ${total} sessions from the requested range. Delete older entries in ${SESSIONS_DIR} to free space or rerun with --status-limit/--status-all.`,
+        `Showing ${entries.length} of ${total} sessions from the requested range. Run "oracle status clear" or delete entries in ${SESSIONS_DIR} to free space, or rerun with --status-limit/--status-all.`,
       ),
     );
   }
+  if (showExamples) {
+    printStatusExamples();
+  }
+}
+
+function printStatusExamples() {
+  console.log('');
+  console.log(chalk.bold('Usage Examples'));
+  console.log(`${chalk.bold('  oracle status --hours 72 --limit 50')}`);
+  console.log(dim('    Show 72h of history capped at 50 entries.'));
+  console.log(`${chalk.bold('  oracle status clear --hours 168')}`);
+  console.log(dim('    Delete sessions older than 7 days (use --all to wipe everything).'));
+  console.log(`${chalk.bold('  oracle session <session-id>')}`);
+  console.log(dim('    Attach to a specific running/completed session to stream its output.'));
 }
 
 async function attachSession(sessionId) {
@@ -248,6 +361,7 @@ async function attachSession(sessionId) {
 
   await printNew();
 
+  // biome-ignore lint/nursery/noUnnecessaryConditions: deliberate infinite poll
   while (true) {
     const latest = await readSessionMetadata(sessionId);
     if (!latest) {
@@ -269,7 +383,12 @@ async function attachSession(sessionId) {
   }
 }
 
-await main().catch((error) => {
+program.action(async function () {
+  const options = this.optsWithGlobals();
+  await runRootCommand(options);
+});
+
+await program.parseAsync(process.argv).catch((error) => {
   console.error(chalk.red('✖'), error?.message || error);
   process.exitCode = 1;
 });

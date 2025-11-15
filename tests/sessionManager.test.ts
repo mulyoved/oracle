@@ -1,0 +1,174 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
+import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+
+type SessionModule = typeof import('../src/sessionManager.js');
+type SessionMetadata = Awaited<ReturnType<SessionModule['initializeSession']>>;
+
+let sessionModule: SessionModule;
+let oracleHomeDir: string;
+
+beforeAll(async () => {
+  oracleHomeDir = await mkdtemp(path.join(os.tmpdir(), 'oracle-session-tests-'));
+  process.env.ORACLE_HOME_DIR = oracleHomeDir;
+  sessionModule = await import('../src/sessionManager.js');
+  await sessionModule.ensureSessionStorage();
+});
+
+beforeEach(async () => {
+  await rm(sessionModule.SESSIONS_DIR, { recursive: true, force: true });
+  await sessionModule.ensureSessionStorage();
+});
+
+afterAll(async () => {
+  await rm(oracleHomeDir, { recursive: true, force: true });
+  delete process.env.ORACLE_HOME_DIR;
+});
+
+describe('session storage setup', () => {
+  test('ensureSessionStorage creates the sessions directory', async () => {
+    await rm(sessionModule.SESSIONS_DIR, { recursive: true, force: true });
+    await sessionModule.ensureSessionStorage();
+    const stats = await stat(sessionModule.SESSIONS_DIR);
+    expect(stats.isDirectory()).toBe(true);
+  });
+});
+
+describe('session identifiers', () => {
+  test('createSessionId slugifies prompts and adds timestamp prefix', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-02-03T04:05:06.789Z'));
+    const id = sessionModule.createSessionId('  Hello, WORLD??? -- Example ');
+    vi.useRealTimers();
+    const expectedPrefix = '2025-02-03-04-05-06';
+    expect(id.startsWith(`${expectedPrefix}-`)).toBe(true);
+    const slug = id.slice(expectedPrefix.length + 1);
+    expect(slug).toBe('hello-world-example');
+  });
+
+  test('createSessionId preserves whole words in slug up to limit', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-02-03T04:05:06Z'));
+    const id = sessionModule.createSessionId('Alpha beta gamma delta epsilon zeta');
+    vi.useRealTimers();
+    const slug = id.slice('2025-02-03-04-05-06'.length + 1);
+    expect(slug).toBe('alpha-beta-gamma-delta-epsilon');
+  });
+});
+
+describe('session lifecycle', () => {
+  test('initializeSession writes metadata, request, and log files', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-04-01T00:00:00Z'));
+    const metadata = await sessionModule.initializeSession(
+      {
+        prompt: 'Inspect code',
+        model: 'gpt-5-pro',
+        file: ['notes.md'],
+        maxInput: 123,
+        system: 'SYS',
+        maxOutput: 456,
+        silent: false,
+        filesReport: true,
+      },
+      '/tmp/cwd',
+    );
+    vi.useRealTimers();
+    const baseDir = path.join(sessionModule.SESSIONS_DIR, metadata.id);
+    const storedMeta = JSON.parse(await readFile(path.join(baseDir, 'session.json'), 'utf8'));
+    expect(storedMeta.options.file).toEqual(['notes.md']);
+    const request = JSON.parse(await readFile(path.join(baseDir, 'request.json'), 'utf8'));
+    expect(request.prompt).toBe('Inspect code');
+    const logContent = await readFile(path.join(baseDir, 'output.log'), 'utf8');
+    expect(logContent).toBe('');
+  });
+
+  test('readSessionMetadata returns null for missing sessions and updateSessionMetadata persists changes', async () => {
+    expect(await sessionModule.readSessionMetadata('missing')).toBeNull();
+    const meta = await sessionModule.initializeSession(
+      { prompt: 'Update me', model: 'gpt-5-pro' },
+      '/tmp/cwd',
+    );
+    await sessionModule.updateSessionMetadata(meta.id, { status: 'complete', extra: 'value' });
+    const updated = await sessionModule.readSessionMetadata(meta.id);
+    expect(updated?.status).toBe('complete');
+    expect(updated?.extra).toBe('value');
+  });
+
+  test('createSessionLogWriter appends logs and supports chunk writes', async () => {
+    const meta = await sessionModule.initializeSession(
+      { prompt: 'Log history', model: 'gpt-5-pro' },
+      '/tmp/cwd',
+    );
+    const writer = sessionModule.createSessionLogWriter(meta.id);
+    writer.logLine('First line');
+    writer.writeChunk('Second chunk');
+    writer.stream.end();
+    await new Promise<void>((resolve) => writer.stream.once('close', () => resolve()));
+    const logText = await sessionModule.readSessionLog(meta.id);
+    expect(logText).toContain('First line');
+    expect(logText).toContain('Second chunk');
+  });
+
+  test('readSessionLog falls back to empty string when no log exists', async () => {
+    expect(await sessionModule.readSessionLog('missing')).toBe('');
+  });
+});
+
+describe('session listing and filtering', () => {
+  test('listSessionsMetadata sorts newest first and filterSessionsByRange enforces limits', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00Z'));
+    await sessionModule.initializeSession({ prompt: 'Old session', model: 'gpt-5-pro' }, '/tmp/a');
+    vi.setSystemTime(new Date('2025-01-02T12:00:00Z'));
+    const recent = await sessionModule.initializeSession(
+      { prompt: 'Recent session', model: 'gpt-5-pro' },
+      '/tmp/b',
+    );
+    vi.setSystemTime(new Date('2025-01-03T00:00:00Z'));
+    const metas = await sessionModule.listSessionsMetadata();
+    expect(metas[0].id).toBe(recent.id);
+
+    const rangeResult = sessionModule.filterSessionsByRange(metas, { hours: 24 });
+    expect(rangeResult.entries.map((entry: SessionMetadata) => entry.id)).toEqual([recent.id]);
+
+    const limited = sessionModule.filterSessionsByRange(metas, { includeAll: true, limit: 1 });
+    expect(limited.entries).toHaveLength(1);
+    expect(limited.truncated).toBe(true);
+    expect(limited.total).toBe(2);
+    vi.useRealTimers();
+  });
+
+  test('deleteSessionsOlderThan removes only sessions past the cutoff', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2025-01-01T00:00:00Z'));
+    const oldMeta = await sessionModule.initializeSession({ prompt: 'Old', model: 'gpt-5-pro' }, '/tmp/a');
+    vi.setSystemTime(new Date('2025-01-03T00:00:00Z'));
+    const freshMeta = await sessionModule.initializeSession({ prompt: 'Fresh', model: 'gpt-5-pro' }, '/tmp/b');
+    vi.setSystemTime(new Date('2025-01-03T12:00:00Z'));
+
+    const result = await sessionModule.deleteSessionsOlderThan({ hours: 24 });
+    expect(result.deleted).toBe(1);
+    expect(await sessionModule.readSessionMetadata(oldMeta.id)).toBeNull();
+    expect(await sessionModule.readSessionMetadata(freshMeta.id)).not.toBeNull();
+    vi.useRealTimers();
+  });
+
+  test('deleteSessionsOlderThan clears everything when includeAll is true', async () => {
+    const meta = await sessionModule.initializeSession({ prompt: 'Only', model: 'gpt-5-pro' }, '/tmp/c');
+    const result = await sessionModule.deleteSessionsOlderThan({ includeAll: true });
+    expect(result.deleted).toBe(1);
+    expect(await sessionModule.readSessionMetadata(meta.id)).toBeNull();
+  });
+});
+
+describe('wait helper', () => {
+  test('wait resolves after the requested duration', async () => {
+    vi.useFakeTimers();
+    const pending = sessionModule.wait(500);
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(pending).resolves.toBeUndefined();
+    vi.useRealTimers();
+  });
+});

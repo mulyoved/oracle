@@ -3,7 +3,23 @@ import chalk from 'chalk';
 import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { buildPrompt, runOracle, renderPromptMarkdown } from '../src/oracle.js';
+import {
+  buildPrompt,
+  runOracle,
+  renderPromptMarkdown,
+  collectPaths,
+  parseIntOption,
+  readFiles,
+  createFileSections,
+  MODEL_CONFIGS,
+  buildRequestBody,
+  extractTextOutput,
+  formatUSD,
+  formatNumber,
+  formatElapsed,
+  getFileTokenStats,
+  printFileTokenStats,
+} from '../src/oracle.js';
 
 chalk.level = 0;
 
@@ -108,14 +124,14 @@ describe('buildPrompt', () => {
 });
 
 describe('runOracle preview mode', () => {
-  test('prints request JSON when preview-json is enabled', async () => {
+  test('prints request JSON when preview mode is json', async () => {
     const logs: string[] = [];
     const result = await runOracle(
       {
         prompt: 'Preview me',
         model: 'gpt-5-pro',
         preview: true,
-        previewJson: true,
+        previewMode: 'json',
         search: true,
       },
       {
@@ -125,6 +141,7 @@ describe('runOracle preview mode', () => {
     );
 
     expect(result.mode).toBe('preview');
+    expect(result.previewMode).toBe('json');
     expect(result.requestBody?.tools).toEqual([{ type: 'web_search_preview' }]);
     expect(logs[0]).toBe('Request JSON');
     expect(logs.some((line) => line.startsWith('Oracle ('))).toBe(false);
@@ -137,6 +154,7 @@ describe('runOracle preview mode', () => {
         prompt: 'Preview only',
         model: 'gpt-5-pro',
         preview: true,
+        previewMode: 'summary',
       },
       {
         apiKey: 'sk-test',
@@ -146,6 +164,25 @@ describe('runOracle preview mode', () => {
 
     expect(logs.some((line) => line.startsWith('Oracle ('))).toBe(false);
     expect(logs.some((line) => line === 'Request JSON')).toBe(false);
+  });
+
+  test('full preview mode emits assembled prompt text', async () => {
+    const logs: string[] = [];
+    await runOracle(
+      {
+        prompt: 'Show everything',
+        model: 'gpt-5-pro',
+        preview: true,
+        previewMode: 'full',
+      },
+      {
+        apiKey: 'sk-test',
+        log: (msg: string) => logs.push(msg),
+      },
+    );
+
+    expect(logs).toContain('Assembled Prompt');
+    expect(logs.some((line) => line.includes('Show everything'))).toBe(true);
   });
 });
 
@@ -202,6 +239,7 @@ describe('runOracle streaming output', () => {
     expect(logs[0].startsWith('Oracle (')).toBe(true);
     expect(logs.some((line) => line.startsWith('Finished in '))).toBe(true);
   });
+
 
   test('silent mode suppresses streamed answer output', async () => {
     const stream = new MockStream(
@@ -369,6 +407,132 @@ describe('runOracle request payload', () => {
       },
     );
     expect(client.lastRequest?.tools).toEqual([{ type: 'web_search_preview' }]);
+  });
+});
+
+describe('oracle utility helpers', () => {
+  test('collectPaths flattens inputs and trims whitespace', () => {
+    const result = collectPaths([' alpha, beta ', 'gamma', '']);
+    expect(result).toEqual(['alpha', 'beta', 'gamma']);
+    const unchanged = collectPaths(undefined, ['start']);
+    expect(unchanged).toEqual(['start']);
+  });
+
+  test('parseIntOption handles undefined and invalid values', () => {
+    expect(parseIntOption(undefined)).toBeUndefined();
+    expect(parseIntOption('42')).toBe(42);
+    expect(() => parseIntOption('not-a-number')).toThrow('Value must be an integer.');
+  });
+
+  test('readFiles deduplicates and expands directories', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'oracle-readfiles-'));
+    try {
+      const nestedDir = path.join(dir, 'nested');
+      await mkdir(nestedDir, { recursive: true });
+      const nestedFile = path.join(nestedDir, 'note.txt');
+      await writeFile(nestedFile, 'nested', 'utf8');
+
+      const duplicateFiles = await readFiles([nestedFile, nestedFile], { cwd: dir });
+      expect(duplicateFiles).toHaveLength(1);
+      expect(duplicateFiles[0].content).toBe('nested');
+
+      const expandedFiles = await readFiles([dir], { cwd: dir });
+      expect(expandedFiles.map((file) => path.basename(file.path))).toContain('note.txt');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('createFileSections renders relative paths', () => {
+    const sections = createFileSections(
+      [{ path: '/tmp/example/file.txt', content: 'contents' }],
+      '/tmp/example',
+    );
+    expect(sections[0].displayPath).toBe('file.txt');
+    expect(sections[0].sectionText).toContain('### File 1: file.txt');
+  });
+
+  test('buildRequestBody respects search toggles', () => {
+    const base = buildRequestBody({
+      modelConfig: MODEL_CONFIGS['gpt-5-pro'],
+      systemPrompt: 'sys',
+      userPrompt: 'user',
+      searchEnabled: false,
+      maxOutputTokens: 222,
+    });
+    expect(base.tools).toBeUndefined();
+    expect(base.max_output_tokens).toBe(222);
+
+    const withSearch = buildRequestBody({
+      modelConfig: MODEL_CONFIGS['gpt-5.1'],
+      systemPrompt: 'sys',
+      userPrompt: 'user',
+      searchEnabled: true,
+      maxOutputTokens: undefined,
+    });
+    expect(withSearch.tools).toEqual([{ type: 'web_search_preview' }]);
+    expect(withSearch.reasoning).toEqual({ effort: 'high' });
+  });
+
+  test('extractTextOutput combines multiple event styles', () => {
+    const responseWithOutputText = {
+      output_text: ['First chunk', 'Second chunk'],
+      output: [],
+    };
+    expect(extractTextOutput(responseWithOutputText)).toBe('First chunk\nSecond chunk');
+
+    const responseWithMessages = {
+      output: [
+        {
+          type: 'message',
+          content: [
+            { type: 'text', text: 'Hello' },
+            { type: 'output_text', text: 'World' },
+          ],
+        },
+        {
+          type: 'output_text',
+          text: '!!!',
+        },
+      ],
+    };
+    expect(extractTextOutput(responseWithMessages)).toBe('Hello\nWorld\n!!!');
+  });
+
+  test('formatting helpers render friendly output', () => {
+    expect(formatUSD(12.345)).toBe('$12.35');
+    expect(formatUSD(0.05)).toBe('$0.050');
+    expect(formatUSD(0.000123)).toBe('$0.000123');
+    expect(formatUSD(Number.NaN)).toBe('n/a');
+
+    expect(formatNumber(1000)).toBe('1,000');
+    expect(formatNumber(4200, { estimated: true })).toBe('4,200 (est.)');
+    expect(formatNumber(null)).toBe('n/a');
+
+    expect(formatElapsed(12345)).toBe('12.35s');
+    expect(formatElapsed(125000)).toBe('2m 5s');
+  });
+
+  test('getFileTokenStats orders files by tokens and reports totals', () => {
+    const files = [
+      { path: '/tmp/a.txt', content: 'aaa' },
+      { path: '/tmp/b.txt', content: 'bbbbbb' },
+    ];
+    const tokenizer = (text: string) => text.length;
+    const { stats, totalTokens } = getFileTokenStats(files, {
+      cwd: '/tmp',
+      tokenizer,
+      tokenizerOptions: {},
+      inputTokenBudget: 100,
+    });
+    expect(totalTokens).toBeGreaterThan(0);
+    expect(stats[0].displayPath).toBe('b.txt');
+    expect(stats[1].displayPath).toBe('a.txt');
+
+    const logs: string[] = [];
+    printFileTokenStats({ stats, totalTokens }, { inputTokenBudget: 100, log: (msg: string) => logs.push(msg) });
+    expect(logs[0]).toBe('File Token Usage');
+    expect(logs.some((line) => line.includes('Total:'))).toBe(true);
   });
 });
 
