@@ -71,6 +71,7 @@ function renderHelpFooter(program: Command, colors: HelpColors): string {
     `${colors.bullet('•')} Run ${colors.accent('--files-report')} to inspect token spend before hitting the API.`,
     `${colors.bullet('•')} Non-preview runs spawn detached sessions so they keep streaming even if your terminal closes.`,
     `${colors.bullet('•')} Ask the model for a memorable 3–5 word slug and pass it via ${colors.accent('--slug "<words>"')} to keep session IDs tidy.`,
+    `${colors.bullet('•')} Need hidden flags? Run ${colors.accent('--debug-help')} to list search/token/browser overrides.`,
   ].join('\n');
 
   const formatExample = (command: string, description: string): string =>

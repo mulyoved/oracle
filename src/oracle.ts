@@ -631,6 +631,7 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
 
   const inputTokenBudget = options.maxInput ?? modelConfig.inputLimit;
   const files = await readFiles(options.file ?? [], { cwd, fsModule });
+  const searchEnabled = options.search !== false;
   logVerbose(`cwd: ${cwd}`);
   if (files.length > 0) {
     const displayPaths = files
@@ -669,11 +670,7 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   const shouldReportFiles =
     (options.filesReport || fileTokenInfo.totalTokens > inputTokenBudget) &&
     fileTokenInfo.stats.length > 0;
-  logVerbose(
-    `Search: ${options.search !== false ? 'enabled' : 'disabled'} | Max output tokens: ${
-      options.maxOutput ?? 'model-default'
-    }`,
-  );
+  logVerbose(`Search: ${searchEnabled ? 'enabled' : 'disabled'} | Max output tokens: ${options.maxOutput ?? 'model-default'}`);
   logVerbose(
     `Input tokens estimate: ${estimatedInputTokens.toLocaleString()} / ${inputTokenBudget.toLocaleString()}`,
   );
@@ -691,7 +688,7 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
     modelConfig,
     systemPrompt,
     userPrompt,
-    searchEnabled: true,
+    searchEnabled,
     maxOutputTokens: options.maxOutput,
   });
 
@@ -805,7 +802,7 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
     })
     .join('/');
   statsParts.push(`tok(i/o/r/t)=${tokensDisplay}`);
-  if (!options.search) {
+  if (!searchEnabled) {
     statsParts.push('search=off');
   }
   if (files.length > 0) {

@@ -235,6 +235,11 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     return;
   }
 
+  if (options.debugHelp) {
+    printDebugHelp(program.name());
+    return;
+  }
+
   if (options.session) {
     await attachSession(options.session);
     return;
@@ -362,6 +367,38 @@ async function executeSession(sessionId: string) {
   } finally {
     stream.end();
   }
+}
+
+function printDebugHelp(cliName: string): void {
+  console.log(chalk.bold('Advanced Options'));
+  printDebugOptionGroup([
+    ['--search <on|off>', 'Enable or disable the server-side search tool (default on).'],
+    ['--max-input <tokens>', 'Override the input token budget.'],
+    ['--max-output <tokens>', 'Override the max output tokens (model default otherwise).'],
+  ]);
+  console.log('');
+  console.log(chalk.bold('Browser Options'));
+  printDebugOptionGroup([
+    ['--browser-chrome-profile <name>', 'Reuse cookies from a specific Chrome profile.'],
+    ['--browser-chrome-path <path>', 'Point to a custom Chrome/Chromium binary.'],
+    ['--browser-url <url>', 'Hit an alternate ChatGPT host.'],
+    ['--browser-timeout <ms|s|m>', 'Cap total wait time for the assistant response.'],
+    ['--browser-input-timeout <ms|s|m>', 'Cap how long we wait for the composer textarea.'],
+    ['--browser-no-cookie-sync', 'Skip copying cookies from your main profile.'],
+    ['--browser-headless', 'Launch Chrome in headless mode.'],
+    ['--browser-hide-window', 'Hide the Chrome window (macOS headful only).'],
+    ['--browser-keep-browser', 'Leave Chrome running after completion.'],
+  ]);
+  console.log('');
+  console.log(chalk.dim(`Tip: run \`${cliName} --help\` to see the primary option set.`));
+}
+
+function printDebugOptionGroup(entries: Array<[string, string]>): void {
+  const flagWidth = Math.max(...entries.map(([flag]) => flag.length));
+  entries.forEach(([flag, description]) => {
+    const label = chalk.cyan(flag.padEnd(flagWidth + 2));
+    console.log(`  ${label}${description}`);
+  });
 }
 
 program.action(async function (this: Command) {
