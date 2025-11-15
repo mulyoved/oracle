@@ -159,6 +159,47 @@ class MockBackgroundClient implements ClientLike {
   }
 }
 
+describe('runOracle no-file tip', () => {
+  test('logs guidance when no files are attached', async () => {
+    const logs: string[] = [];
+    const mockStream = new MockStream([], {
+      id: 'resp-1',
+      status: 'completed',
+      usage: {
+        input_tokens: 10,
+        output_tokens: 5,
+        reasoning_tokens: 0,
+        total_tokens: 15,
+      },
+      output: [
+        {
+          type: 'message',
+          content: [{ type: 'text', text: 'hello' }],
+        },
+      ],
+    });
+    const client = new MockClient(mockStream);
+    await runOracle(
+      {
+        prompt: 'hello',
+        model: 'gpt-5-pro',
+        search: false,
+        background: false,
+      },
+      {
+        apiKey: 'sk-test',
+        client,
+        log: (msg: string) => logs.push(msg),
+        write: () => true,
+      },
+    );
+
+    const combined = logs.join('\n').toLowerCase();
+    expect(combined).toContain('no files attached');
+    expect(combined).toContain('--file');
+  });
+});
+
 describe('buildPrompt', () => {
   test('includes attached file sections with relative paths', async () => {
     const { dir, filePath } = await createTempFile('hello from file');
@@ -290,7 +331,7 @@ describe('runOracle streaming output', () => {
 
     expect(result.mode).toBe('live');
     expect(writes.join('')).toBe('Hello world\n\n');
-    expect(logs[0].startsWith('Oracle (')).toBe(true);
+    expect(logs.some((line) => line.startsWith('Oracle ('))).toBe(true);
     expect(logs.some((line) => line.startsWith('Finished in '))).toBe(true);
   });
 
@@ -322,7 +363,7 @@ describe('runOracle streaming output', () => {
     );
 
     expect(writes).toEqual([]);
-    expect(logs[0].startsWith('Oracle (')).toBe(true);
+    expect(logs.some((line) => line.startsWith('Oracle ('))).toBe(true);
     const finishedLine = logs.find((line) => line.startsWith('Finished in '));
     expect(finishedLine).toBeDefined();
   });

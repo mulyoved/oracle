@@ -93,6 +93,9 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
     logVerbose(`Attached files (${files.length}): ${displayPaths}${extra}`);
   } else {
     logVerbose('No files attached.');
+    if (!isPreview) {
+      log(dim('Tip: no files attached — Oracle works best with project context. Add files via --file path/to/code or docs.'));
+    }
   }
   const fileTokenInfo = getFileTokenStats(files, {
     cwd,
