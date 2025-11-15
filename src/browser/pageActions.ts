@@ -500,6 +500,7 @@ function buildResponseObserverExpression(timeoutMs: number): string {
     const SELECTORS = ${selectorsLiteral};
     const STOP_SELECTOR = '${STOP_BUTTON_SELECTOR}';
     const CONVERSATION_SELECTOR = 'article[data-testid^="conversation-turn"]';
+    const settleDelayMs = 800;
 
     const isAssistantTurn = (node) => {
       if (!(node instanceof HTMLElement)) return false;
@@ -569,11 +570,32 @@ function buildResponseObserverExpression(timeoutMs: number): string {
         }, ${timeoutMs});
       });
 
+    const waitForSettle = async (snapshot) => {
+      const settleWindowMs = 5000;
+      const settleIntervalMs = 400;
+      const deadline = Date.now() + settleWindowMs;
+      let latest = snapshot;
+      let lastLength = snapshot?.text?.length ?? 0;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, settleIntervalMs));
+        const refreshed = extractFromTurns();
+        if (refreshed && (refreshed.text?.length ?? 0) >= lastLength) {
+          latest = refreshed;
+          lastLength = refreshed.text?.length ?? lastLength;
+        }
+        const stopVisible = Boolean(document.querySelector(STOP_SELECTOR));
+        if (!stopVisible) {
+          break;
+        }
+      }
+      return latest ?? snapshot;
+    };
+
     const extracted = extractFromTurns();
     if (extracted) {
-      return extracted;
+      return waitForSettle(extracted);
     }
-    return captureViaObserver();
+    return captureViaObserver().then((payload) => waitForSettle(payload));
   })()`;
 }
 
