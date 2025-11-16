@@ -84,6 +84,7 @@ export async function attachSession(sessionId: string, options?: AttachSessionOp
   }
   const initialStatus = metadata.status;
   const wantsRender = Boolean(options?.renderMarkdown);
+  const isVerbose = Boolean(process.env.ORACLE_VERBOSE_RENDER);
   if (!options?.suppressMetadata) {
     const reattachLine = buildReattachLine(metadata);
     if (reattachLine) {
@@ -111,13 +112,24 @@ export async function attachSession(sessionId: string, options?: AttachSessionOp
     const fullLog = await readSessionLog(sessionId);
     const trimmed = trimBeforeFirstAnswer(fullLog);
     const size = Buffer.byteLength(trimmed, 'utf8');
-    const canRender = wantsRender && isTty() && chalk.level > 0 && size <= MAX_RENDER_BYTES;
+    const canRender = wantsRender && isTty() && size <= MAX_RENDER_BYTES;
     if (wantsRender && size > MAX_RENDER_BYTES) {
-      console.log(dim(`Render skipped (log too large: ${size} bytes > ${MAX_RENDER_BYTES}). Showing raw text.`));
-    } else if (wantsRender && (!isTty() || chalk.level === 0)) {
-      console.log(dim('Render requested but stdout is not a rich TTY; showing raw text.'));
+      const msg = `Render skipped (log too large: ${size} bytes > ${MAX_RENDER_BYTES}). Showing raw text.`;
+      console.log(dim(msg));
+      if (isVerbose) {
+        console.log(dim(`Verbose: renderMarkdown=true tty=${isTty()} size=${size}`));
+      }
+    } else if (wantsRender && !isTty()) {
+      const msg = 'Render requested but stdout is not a TTY; showing raw text.';
+      console.log(dim(msg));
+      if (isVerbose) {
+        console.log(dim(`Verbose: renderMarkdown=true tty=${isTty()} size=${size}`));
+      }
     }
     if (canRender) {
+      if (isVerbose) {
+        console.log(dim(`Verbose: rendering markdown (size=${size}, tty=${isTty()})`));
+      }
       process.stdout.write(renderMarkdownAnsi(trimmed));
     } else {
       process.stdout.write(trimmed);
@@ -127,6 +139,9 @@ export async function attachSession(sessionId: string, options?: AttachSessionOp
 
   if (wantsRender) {
     console.log(dim('Render will apply after completion; streaming raw text meanwhile...'));
+    if (isVerbose) {
+      console.log(dim(`Verbose: streaming phase renderMarkdown=true tty=${isTty()}`));
+    }
   }
 
   let lastLength = 0;

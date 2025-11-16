@@ -35,6 +35,9 @@ export async function handleSessionCommand(
   deps: SessionCommandDependencies = defaultDependencies,
 ): Promise<void> {
   const sessionOptions = command.opts<StatusOptions>();
+  if ((sessionOptions as any).verboseRender) {
+    process.env.ORACLE_VERBOSE_RENDER = '1';
+  }
   const clearRequested = Boolean(sessionOptions.clear || sessionOptions.clean);
   if (clearRequested) {
     if (sessionId) {

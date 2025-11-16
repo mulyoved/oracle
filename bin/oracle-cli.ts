@@ -144,6 +144,7 @@ program
   .addOption(new Option('--exec-session <id>').hideHelp())
   .addOption(new Option('--status', 'Show stored sessions (alias for `oracle status`).').default(false).hideHelp())
   .option('--render-markdown', 'Emit the assembled markdown bundle for prompt + files and exit.', false)
+  .option('--verbose-render', 'Show render/TTY diagnostics when replaying sessions.', false)
   .addOption(
     new Option('--search <mode>', 'Set server-side search behavior (on/off).')
       .argParser(parseSearchOption)
