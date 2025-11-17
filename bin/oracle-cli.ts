@@ -72,6 +72,7 @@ interface CliOptions extends OptionValues {
   browserKeepBrowser?: boolean;
   browserAllowCookieErrors?: boolean;
   browserInlineFiles?: boolean;
+  remoteChrome?: string;
   verbose?: boolean;
   debugHelp?: boolean;
   heartbeat?: number;
@@ -173,6 +174,9 @@ program
   .addOption(new Option('--browser-keep-browser', 'Keep Chrome running after completion.').hideHelp())
   .addOption(
     new Option('--browser-allow-cookie-errors', 'Continue even if Chrome cookies cannot be copied.').hideHelp(),
+  )
+  .addOption(
+    new Option('--remote-chrome <host:port>', 'Connect to remote Chrome DevTools Protocol (e.g., 192.168.1.10:9222).'),
   )
   .addOption(
     new Option('--browser-inline-files', 'Paste files directly into the ChatGPT composer instead of uploading attachments.').default(false),
