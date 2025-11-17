@@ -23,6 +23,7 @@ Shared guardrails distilled from the various `~/Projects/*/AGENTS.md` files (sta
 - Run any command that could hang (tests, servers, log streams, browser automation) inside tmux using the repository’s preferred entry point.
 - Do not wrap tmux commands in infinite polling loops. Run the job, sleep briefly (≤30 s), capture output, and surface status at least once per minute.
 - Document which sessions you create and clean them up when they are no longer needed unless the workflow explicitly calls for persistent watchers.
+- For MCP/mcporter smoke tests against GPT‑5 Pro, set the client timeout to at least 10 minutes (e.g., `MCPORTER_CALL_TIMEOUT=600000` or `--timeout 600000`) so background runs have time to finish.
 
 ### Build, Test & Verification
 - Before handing off work, run the full “green gate” for that repo (lint, type-check, tests, doc scripts, etc.). Follow the same command set humans run—no ad-hoc shortcuts.
