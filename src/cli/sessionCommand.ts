@@ -1,3 +1,4 @@
+import chalk from 'chalk';
 import type { Command, OptionValues } from 'commander';
 import { usesDefaultStatusFilters } from './options.js';
 import { attachSession, showStatus, type AttachSessionOptions, type ShowStatusOptions } from './sessionDisplay.js';
@@ -74,10 +75,13 @@ export async function handleSessionCommand(
     }
     try {
       const paths = await deps.getSessionPaths(sessionId);
-      console.log(`Session dir: ${paths.dir}`);
-      console.log(`Metadata: ${paths.metadata}`);
-      console.log(`Request: ${paths.request}`);
-      console.log(`Log: ${paths.log}`);
+      const richTty = Boolean(process.stdout.isTTY && chalk.level > 0);
+      const label = (text: string): string => (richTty ? chalk.cyan(text) : text);
+      const value = (text: string): string => (richTty ? chalk.dim(text) : text);
+      console.log(`${label('Session dir:')} ${value(paths.dir)}`);
+      console.log(`${label('Metadata:')} ${value(paths.metadata)}`);
+      console.log(`${label('Request:')} ${value(paths.request)}`);
+      console.log(`${label('Log:')} ${value(paths.log)}`);
     } catch (error) {
       console.error(error instanceof Error ? error.message : String(error));
       process.exitCode = 1;
