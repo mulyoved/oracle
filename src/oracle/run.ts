@@ -29,6 +29,7 @@ import {
 } from './errors.js';
 import { createDefaultClientFactory } from './client.js';
 import { startHeartbeat } from '../heartbeat.js';
+import { startOscProgress } from './oscProgress.js';
 import { getCliVersion } from '../version.js';
 import { createFsAdapter } from './fsAdapter.js';
 const isTty = process.stdout.isTTY;
@@ -188,6 +189,11 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
 
   const openAiClient: ClientLike = client ?? clientFactory(apiKey);
   logVerbose('Dispatching request to OpenAI Responses API...');
+  const stopOscProgress = startOscProgress({
+    label: useBackground ? 'Waiting for OpenAI (background)' : 'Waiting for OpenAI',
+    targetMs: useBackground ? BACKGROUND_MAX_WAIT_MS : 10 * 60_000,
+    write,
+  });
 
   const runStart = now();
   let response: OracleResponse | null = null;
@@ -202,63 +208,68 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
     }
   };
 
-  if (useBackground) {
-    response = await executeBackgroundResponse({
-      client: openAiClient,
-      requestBody,
-      log,
-      wait,
-      heartbeatIntervalMs: options.heartbeatIntervalMs,
-      now,
-    });
-    elapsedMs = now() - runStart;
-  } else {
-    const stream: ResponseStreamLike = await openAiClient.responses.stream(requestBody);
-    let heartbeatActive = false;
-    let stopHeartbeat: (() => void) | null = null;
-    const stopHeartbeatNow = () => {
-      if (!heartbeatActive) {
-        return;
-      }
-      heartbeatActive = false;
-      stopHeartbeat?.();
-      stopHeartbeat = null;
-    };
-    if (options.heartbeatIntervalMs && options.heartbeatIntervalMs > 0) {
-      heartbeatActive = true;
-      stopHeartbeat = startHeartbeat({
-        intervalMs: options.heartbeatIntervalMs,
-        log: (message) => log(message),
-        isActive: () => heartbeatActive,
-        makeMessage: (elapsedMs) => {
-          const elapsedText = formatElapsed(elapsedMs);
-          return `API connection active — ${elapsedText} elapsed. Expect up to ~10 min before GPT-5 responds.`;
-        },
+  try {
+    if (useBackground) {
+      response = await executeBackgroundResponse({
+        client: openAiClient,
+        requestBody,
+        log,
+        wait,
+        heartbeatIntervalMs: options.heartbeatIntervalMs,
+        now,
       });
-    }
-    try {
-      for await (const event of stream) {
-        if (event.type === 'response.output_text.delta') {
-          stopHeartbeatNow();
-          sawTextDelta = true;
-          ensureAnswerHeader();
-          if (!options.silent && typeof event.delta === 'string') {
-            write(event.delta);
+      elapsedMs = now() - runStart;
+    } else {
+      const stream: ResponseStreamLike = await openAiClient.responses.stream(requestBody);
+      let heartbeatActive = false;
+      let stopHeartbeat: (() => void) | null = null;
+      const stopHeartbeatNow = () => {
+        if (!heartbeatActive) {
+          return;
+        }
+        heartbeatActive = false;
+        stopHeartbeat?.();
+        stopHeartbeat = null;
+      };
+      if (options.heartbeatIntervalMs && options.heartbeatIntervalMs > 0) {
+        heartbeatActive = true;
+        stopHeartbeat = startHeartbeat({
+          intervalMs: options.heartbeatIntervalMs,
+          log: (message) => log(message),
+          isActive: () => heartbeatActive,
+          makeMessage: (elapsedMs) => {
+            const elapsedText = formatElapsed(elapsedMs);
+            return `API connection active — ${elapsedText} elapsed. Expect up to ~10 min before GPT-5 responds.`;
+          },
+        });
+      }
+      try {
+        for await (const event of stream) {
+          if (event.type === 'response.output_text.delta') {
+            stopOscProgress();
+            stopHeartbeatNow();
+            sawTextDelta = true;
+            ensureAnswerHeader();
+            if (!options.silent && typeof event.delta === 'string') {
+              write(event.delta);
+            }
           }
         }
+      } catch (streamError) {
+        if (typeof stream.abort === 'function') {
+          stream.abort();
+        }
+        stopHeartbeatNow();
+        const transportError = toTransportError(streamError);
+        log(chalk.yellow(describeTransportError(transportError)));
+        throw transportError;
       }
-    } catch (streamError) {
-      if (typeof stream.abort === 'function') {
-        stream.abort();
-      }
+      response = await stream.finalResponse();
       stopHeartbeatNow();
-      const transportError = toTransportError(streamError);
-      log(chalk.yellow(describeTransportError(transportError)));
-      throw transportError;
+      elapsedMs = now() - runStart;
     }
-    response = await stream.finalResponse();
-    stopHeartbeatNow();
-    elapsedMs = now() - runStart;
+  } finally {
+    stopOscProgress();
   }
 
   if (!response) {
