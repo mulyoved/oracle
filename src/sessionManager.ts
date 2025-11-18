@@ -70,6 +70,7 @@ export interface StoredRunOptions {
   search?: boolean;
   baseUrl?: string;
   azure?: AzureOptions;
+  effectiveModelId?: string;
 }
 
 export interface SessionMetadata {

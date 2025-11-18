@@ -1,6 +1,17 @@
 export type TokenizerFn = (input: unknown, options?: Record<string, unknown>) => number;
 
-export type ModelName = 'gpt-5-pro' | 'gpt-5.1';
+export type ModelName = 'gpt-5-pro' | 'gpt-5.1' | 'gemini-3-pro';
+
+export interface AzureOptions {
+  endpoint?: string;
+  apiVersion?: string;
+  deployment?: string;
+}
+
+export type ClientFactory = (
+  apiKey: string,
+  options?: { baseUrl?: string; azure?: AzureOptions; model?: ModelName; resolvedModelId?: string },
+) => ClientLike;
 
 export interface ModelConfig {
   model: ModelName;
@@ -60,7 +71,6 @@ export interface ResponseStreamEvent {
 
 export interface ResponseStreamLike extends AsyncIterable<ResponseStreamEvent> {
   finalResponse(): Promise<OracleResponse>;
-  abort?: () => void;
 }
 
 export interface ClientLike {
@@ -70,14 +80,6 @@ export interface ClientLike {
     retrieve(id: string): Promise<OracleResponse>;
   };
 }
-
-export interface AzureOptions {
-  endpoint?: string;
-  deployment?: string;
-  apiVersion?: string;
-}
-
-export type ClientFactory = (apiKey: string, options?: { baseUrl?: string; azure?: AzureOptions }) => ClientLike;
 
 export interface RunOracleOptions {
   prompt: string;
@@ -96,6 +98,7 @@ export interface RunOracleOptions {
   baseUrl?: string;
   azure?: AzureOptions;
   sessionId?: string;
+  effectiveModelId?: string;
   verbose?: boolean;
   heartbeatIntervalMs?: number;
   browserInlineFiles?: boolean;

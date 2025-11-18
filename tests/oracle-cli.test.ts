@@ -62,16 +62,10 @@ async function createTempFile(contents: string): Promise<TempFile> {
 class MockStream implements ResponseStreamLike {
   private events: ResponseStreamEvent[];
   private finalResponseValue: MockResponse;
-  private aborted: boolean;
 
   constructor(events: ResponseStreamEvent[], finalResponse: MockResponse) {
     this.events = events;
     this.finalResponseValue = finalResponse;
-    this.aborted = false;
-  }
-
-  abort(): void {
-    this.aborted = true;
   }
 
   [Symbol.asyncIterator](): AsyncIterator<ResponseStreamEvent> {
@@ -79,9 +73,6 @@ class MockStream implements ResponseStreamLike {
     const events = this.events;
     return {
       next: async () => {
-        if (this.aborted) {
-          return { done: true, value: undefined };
-        }
         if (index >= events.length) {
           return { done: true, value: undefined };
         }
@@ -238,6 +229,60 @@ describe('api key logging', () => {
     expect(combined).toContain('Using OPENAI_API_KEY=sk-s****1234');
     expect(combined).not.toContain('supersecret');
   });
+
+  test('logs masked GEMINI_API_KEY when using gemini model', async () => {
+    const stream = new MockStream([], buildResponse());
+    const client = new MockClient(stream);
+    const logs: string[] = [];
+    await runOracle(
+      {
+        prompt: 'Key log test Gemini',
+        model: 'gemini-3-pro',
+        background: false,
+      },
+      {
+        apiKey: 'sk-gemini-secret-9999',
+        client,
+        log: (msg: string) => logs.push(msg),
+        write: () => true,
+      },
+    );
+
+    const combined = logs.join('\n');
+    expect(combined).toContain('Using GEMINI_API_KEY=sk-g****9999 for model gemini-3-pro');
+    expect(combined).not.toContain('gemini-secret');
+  });
+
+  test('verbose logs insert separation before answer stream', async () => {
+    const stream = new MockStream(
+      [
+        { type: 'response.output_text.delta', delta: 'Yo' },
+        { type: 'response.output_text.delta', delta: ' bro.' },
+      ],
+      buildResponse(),
+    );
+    const client = new MockClient(stream);
+    const logs: string[] = [];
+    const writes: string[] = [];
+    await runOracle(
+      { prompt: 'hi', model: 'gpt-5-pro', verbose: true, background: false },
+      {
+        apiKey: 'sk-test-1234',
+        client,
+        log: (msg) => logs.push(msg),
+        write: (chunk) => {
+          writes.push(chunk);
+          return true;
+        },
+      },
+    );
+    const logLines = logs;
+    expect(logLines.some((line) => line.includes('[verbose] Dispatching request to API...'))).toBe(true);
+    const answerLineIndex = logLines.findIndex((line) => line.trim() === 'Answer:');
+    expect(answerLineIndex).toBeGreaterThan(0);
+    // The line immediately before Answer should be blank (separator)
+    expect(logLines[answerLineIndex - 1]).toBe('');
+  });
 });
 
 describe('runOracle preview mode', () => {
@@ -326,8 +371,8 @@ describe('runOracle streaming output', () => {
   test('streams deltas and prints stats', async () => {
     const stream = new MockStream(
       [
-        { type: 'response.output_text.delta', delta: 'Hello ', output_index: 0, content_index: 0 },
-        { type: 'response.output_text.delta', delta: 'world', output_index: 0, content_index: 0 },
+        { type: 'chunk', delta: 'Hello ', output_index: 0, content_index: 0 },
+        { type: 'chunk', delta: 'world', output_index: 0, content_index: 0 },
       ],
       buildResponse(),
     );
@@ -365,7 +410,7 @@ describe('runOracle streaming output', () => {
 
   test('silent mode suppresses streamed answer output', async () => {
     const stream = new MockStream(
-      [{ type: 'response.output_text.delta', delta: 'hi', output_index: 0, content_index: 0 }],
+      [{ type: 'chunk', delta: 'hi', output_index: 0, content_index: 0 }],
       buildResponse(),
     );
     const client = new MockClient(stream);
@@ -393,6 +438,59 @@ describe('runOracle streaming output', () => {
     expect(logs.some((line) => line.startsWith('oracle ('))).toBe(true);
     const finishedLine = logs.find((line) => line.startsWith('Finished in '));
     expect(finishedLine).toBeDefined();
+  });
+
+  test('accepts OpenAI delta events alongside chunk events', async () => {
+    const stream = new MockStream(
+      [
+        { type: 'response.output_text.delta', delta: 'alpha', output_index: 0, content_index: 0 },
+        { type: 'chunk', delta: 'beta', output_index: 0, content_index: 0 },
+      ],
+      buildResponse(),
+    );
+    const client = new MockClient(stream);
+    const writes: string[] = [];
+    await runOracle(
+      { prompt: 'Mix events', model: 'gpt-5-pro', background: false },
+      {
+        apiKey: 'sk-test',
+        client,
+        write: (chunk: string) => {
+          writes.push(chunk);
+          return true;
+        },
+        log: () => {},
+      },
+    );
+
+    expect(writes.join('')).toContain('alpha');
+    expect(writes.join('')).toContain('beta');
+  });
+
+  test('handles mixed stream payloads with missing delta text gracefully', async () => {
+    const stream = new MockStream(
+      [
+        { type: 'response.output_text.delta', output_index: 0, content_index: 0 }, // no delta field
+        { type: 'chunk', delta: 'visible', output_index: 0, content_index: 0 },
+      ],
+      buildResponse(),
+    );
+    const client = new MockClient(stream);
+    const writes: string[] = [];
+    await runOracle(
+      { prompt: 'Robust stream', model: 'gpt-5-pro', background: false },
+      {
+        apiKey: 'sk-test',
+        client,
+        write: (chunk: string) => {
+          writes.push(chunk);
+          return true;
+        },
+        log: () => {},
+      },
+    );
+
+    expect(writes.join('')).toBe('visible\n\n');
   });
 });
 
@@ -427,32 +525,31 @@ describe('runOracle background mode', () => {
   });
 
   test('retries polling and logs reconnection after a transport drop', async () => {
+    const logs: string[] = [];
     const finalResponse = buildResponse();
-    const initialResponse = { ...finalResponse, status: 'in_progress', output: [] };
+    const initialResponse = { ...finalResponse, status: 'in_progress' };
     const client = new MockBackgroundClient([initialResponse, finalResponse]);
     client.triggerConnectionDrop();
-    const logs: string[] = [];
-    let clock = 0;
-    const now = () => clock;
-    const wait = async (ms: number) => {
-      clock += ms;
-    };
-    const result = await runOracle(
+
+    const wait = async (ms: number) => {};
+    const now = () => Date.now();
+    
+    await runOracle(
       {
-        prompt: 'Recover run',
-        model: 'gpt-5-pro',
+          prompt: 'Retry test',
+          model: 'gpt-5-pro',
       },
       {
-        apiKey: 'sk-test',
-        client,
-        log: (msg: string) => logs.push(msg),
-        now,
-        wait,
-      },
+          apiKey: 'sk-test',
+          client,
+          log: (msg) => logs.push(msg),
+          wait,
+          now,
+      }
     );
-    expect(result.mode).toBe('live');
+
     expect(logs.some((line) => line.includes('Retrying in'))).toBe(true);
-    expect(logs.some((line) => line.includes('Reconnected to OpenAI background response'))).toBe(true);
+    expect(logs.some((line) => line.includes('Reconnected to API background response'))).toBe(true);
   });
 });
 

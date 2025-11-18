@@ -102,6 +102,16 @@ describe('resolveRunOptionsFromConfig', () => {
       }),
     ).toThrow('Gemini is only supported via API. Use --engine api.');
   });
+
+  it('ignores config browser engine and forces api when model is gemini', () => {
+    const { resolvedEngine, runOptions } = resolveRunOptionsFromConfig({
+      prompt: basePrompt,
+      model: 'gemini-3-pro',
+      userConfig: { engine: 'browser' },
+    });
+    expect(resolvedEngine).toBe('api');
+    expect(runOptions.model).toBe('gemini-3-pro');
+  });
 });
 
 describe('estimateRequestTokens', () => {

@@ -190,7 +190,6 @@ program
   .addOption(new Option('--status', 'Show stored sessions (alias for `oracle status`).').default(false).hideHelp())
   .option('--render-markdown', 'Emit the assembled markdown bundle for prompt + files and exit.', false)
   .option('--verbose-render', 'Show render/TTY diagnostics when replaying sessions.', false)
-  .option('--show-model-id', 'Print the resolved model identifier (useful for Gemini preview aliases).', false)
   .addOption(
     new Option('--search <mode>', 'Set server-side search behavior (on/off).')
       .argParser(parseSearchOption)
@@ -333,6 +332,7 @@ function buildRunOptions(options: ResolvedCliOptions, overrides: Partial<RunOrac
   return {
     prompt: options.prompt,
     model: options.model,
+    effectiveModelId: overrides.effectiveModelId ?? options.effectiveModelId ?? options.model,
     file: overrides.file ?? options.file ?? [],
     slug: overrides.slug ?? options.slug,
     filesReport: overrides.filesReport ?? options.filesReport,
@@ -378,6 +378,7 @@ function buildRunOptionsFromMetadata(metadata: SessionMetadata): RunOracleOption
   return {
     prompt: stored.prompt ?? '',
     model: (stored.model as ModelName) ?? 'gpt-5-pro',
+    effectiveModelId: stored.effectiveModelId ?? stored.model,
     file: stored.file ?? [],
     slug: stored.slug,
     filesReport: stored.filesReport,
@@ -503,6 +504,7 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     engine = 'api';
   }
   const resolvedModel: ModelName = isGemini ? resolveApiModel(cliModelArg) : resolvedModelCandidate;
+  const effectiveModelId = resolvedModel.startsWith('gemini') ? resolveGeminiModelId(resolvedModel) : resolvedModel;
   const resolvedBaseUrl = normalizeBaseUrl(options.baseUrl ?? process.env.OPENAI_BASE_URL);
   const resolvedOptions: ResolvedCliOptions = { ...options, model: resolvedModel };
   resolvedOptions.baseUrl = resolvedBaseUrl;
@@ -517,13 +519,8 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     engine,
   });
 
-  if (options.showModelId) {
-    let resolvedId: string = resolvedModel;
-    if (resolvedModel.startsWith('gemini')) {
-      resolvedId = resolveGeminiModelId(resolvedModel);
-    }
-    console.log(chalk.dim(`Resolved model id: ${resolvedId}`));
-  }
+  const effectiveModelId =
+    resolvedModel.startsWith('gemini') ? resolveGeminiModelId(resolvedModel) : resolvedModel;
 
   if (await handleStatusFlag(options, { attachSession, showStatus })) {
     return;
@@ -650,7 +647,11 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     process.cwd(),
     notifications,
   );
-  const liveRunOptions: RunOracleOptions = { ...baseRunOptions, sessionId: sessionMeta.id };
+  const liveRunOptions: RunOracleOptions = {
+    ...baseRunOptions,
+    sessionId: sessionMeta.id,
+    effectiveModelId,
+  };
   const disableDetachEnv = process.env.ORACLE_NO_DETACH === '1';
   const detachAllowed = shouldDetachSession({
     engine,

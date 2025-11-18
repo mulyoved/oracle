@@ -8,7 +8,9 @@ import type {
   OracleRequestBody,
   OracleResponse,
   ResponseStreamLike,
+  ModelName,
 } from './types.js';
+import { createGeminiClient } from './gemini.js';
 
 const CUSTOM_CLIENT_FACTORY = loadCustomClientFactory();
 
@@ -16,7 +18,14 @@ export function createDefaultClientFactory(): ClientFactory {
   if (CUSTOM_CLIENT_FACTORY) {
     return CUSTOM_CLIENT_FACTORY;
   }
-  return (key: string, options?: { baseUrl?: string; azure?: AzureOptions }): ClientLike => {
+  return (
+    key: string,
+    options?: { baseUrl?: string; azure?: AzureOptions; model?: ModelName; resolvedModelId?: string },
+  ): ClientLike => {
+    if (options?.model && options.model.startsWith('gemini')) {
+      return createGeminiClient(key, options.model, options.resolvedModelId);
+    }
+
     let instance: OpenAI;
 
     if (options?.azure?.endpoint) {
