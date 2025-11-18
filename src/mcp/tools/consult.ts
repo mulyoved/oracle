@@ -14,6 +14,7 @@ import { CHATGPT_URL } from '../../browser/constants.js';
 import { consultInputSchema } from '../types.js';
 import { loadUserConfig } from '../../config.js';
 import { resolveNotificationSettings } from '../../cli/notifier.js';
+import { mapModelToBrowserLabel, resolveBrowserModelLabel } from '../../cli/browserConfig.js';
 
 // Use raw shapes so the MCP SDK (with its bundled Zod) wraps them and emits valid JSON Schema.
 const consultInputShape = {
@@ -69,8 +70,8 @@ export function registerConsultTool(server: McpServer): void {
       }
 
       let browserConfig: BrowserSessionConfig | undefined;
-      const desiredModelLabel = model?.trim();
       if (resolvedEngine === 'browser') {
+        const desiredModelLabel = resolveBrowserModelLabel(model?.trim(), runOptions.model);
         // Keep the browser path minimal; only forward a desired model label for the ChatGPT picker.
         browserConfig = {
           url: CHATGPT_URL,
@@ -78,7 +79,7 @@ export function registerConsultTool(server: McpServer): void {
           headless: false,
           hideWindow: false,
           keepBrowser: false,
-          desiredModel: desiredModelLabel || undefined,
+          desiredModel: desiredModelLabel || mapModelToBrowserLabel(runOptions.model),
         };
       }
 
