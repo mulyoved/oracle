@@ -40,8 +40,13 @@ import { handleSessionCommand, type StatusOptions, formatSessionCleanupMessage }
 import { isErrorLogged } from '../src/cli/errorUtils.js';
 import { handleSessionAlias, handleStatusFlag } from '../src/cli/rootAlias.js';
 import { getCliVersion } from '../src/version.js';
-import { runDryRunSummary } from '../src/cli/dryRun.js';
+import { runDryRunSummary, runBrowserPreview } from '../src/cli/dryRun.js';
 import { launchTui } from '../src/cli/tui/index.js';
+import {
+  resolveNotificationSettings,
+  deriveNotificationSettingsFromMetadata,
+  type NotificationSettings,
+} from '../src/cli/notifier.js';
 
 interface CliOptions extends OptionValues {
   prompt?: string;
@@ -61,6 +66,8 @@ interface CliOptions extends OptionValues {
   apiKey?: string;
   session?: string;
   execSession?: string;
+  notify?: boolean;
+  notifySound?: boolean;
   renderMarkdown?: boolean;
   sessionId?: string;
   engine?: EngineMode;
@@ -76,6 +83,7 @@ interface CliOptions extends OptionValues {
   browserKeepBrowser?: boolean;
   browserAllowCookieErrors?: boolean;
   browserInlineFiles?: boolean;
+  browserBundleFiles?: boolean;
   verbose?: boolean;
   debugHelp?: boolean;
   heartbeat?: number;
@@ -99,6 +107,10 @@ program.hook('preAction', (thisCommand) => {
     return;
   }
   if (userCliArgs.some((arg) => arg === '--help' || arg === '-h')) {
+    return;
+  }
+  if (userCliArgs.length === 0 && tuiEnabled()) {
+    // Skip prompt enforcement; runRootCommand will launch the TUI.
     return;
   }
   const opts = thisCommand.optsWithGlobals() as CliOptions;
@@ -149,6 +161,13 @@ program
   )
   .option('--files-report', 'Show token usage per attached file (also prints automatically when files exceed the token budget).', false)
   .option('-v, --verbose', 'Enable verbose logging for all operations.', false)
+  .addOption(
+    new Option('--[no-]notify', 'Desktop notification when a session finishes (default on unless CI/SSH).')
+      .default(undefined),
+  )
+  .addOption(
+    new Option('--[no-]notify-sound', 'Play a notification sound on completion (default off).').default(undefined),
+  )
   .option('--dry-run', 'Validate inputs and show token estimates without calling the model.', false)
   .addOption(
     new Option('--preview [mode]', 'Preview the request without calling the API (summary | json | full).')
@@ -193,6 +212,7 @@ program
   .addOption(
     new Option('--browser-inline-files', 'Paste files directly into the ChatGPT composer instead of uploading attachments.').default(false),
   )
+  .addOption(new Option('--browser-bundle-files', 'Bundle all attachments into a single archive before uploading.').default(false))
   .option('--debug-help', 'Show the advanced/debug option set and exit.', false)
   .option('--heartbeat <seconds>', 'Emit periodic in-progress updates (0 to disable).', parseHeartbeatOption, 30)
   .showHelpAfterError('(use --help for usage)');
@@ -297,6 +317,7 @@ function buildRunOptions(options: ResolvedCliOptions, overrides: Partial<RunOrac
     verbose: overrides.verbose ?? options.verbose,
     heartbeatIntervalMs: overrides.heartbeatIntervalMs ?? resolveHeartbeatIntervalMs(options.heartbeat),
     browserInlineFiles: overrides.browserInlineFiles ?? options.browserInlineFiles ?? false,
+    browserBundleFiles: overrides.browserBundleFiles ?? options.browserBundleFiles ?? false,
     background: overrides.background ?? undefined,
   };
 }
@@ -328,6 +349,7 @@ function buildRunOptionsFromMetadata(metadata: SessionMetadata): RunOracleOption
     verbose: stored.verbose,
     heartbeatIntervalMs: stored.heartbeatIntervalMs,
     browserInlineFiles: stored.browserInlineFiles,
+    browserBundleFiles: stored.browserBundleFiles,
     background: stored.background,
   };
 }
@@ -408,13 +430,23 @@ async function runRootCommand(options: CliOptions): Promise<void> {
   }
 
   if (previewMode) {
-    if (engine === 'browser') {
-      throw new Error('--engine browser cannot be combined with --preview.');
-    }
     if (!options.prompt) {
       throw new Error('Prompt is required when using --preview.');
     }
     const runOptions = buildRunOptions(resolvedOptions, { preview: true, previewMode });
+    if (engine === 'browser') {
+      await runBrowserPreview(
+        {
+          runOptions,
+          cwd: process.cwd(),
+          version: VERSION,
+          previewMode,
+          log: console.log,
+        },
+        {},
+      );
+      return;
+    }
     await runOracle(runOptions, { log: console.log, write: (chunk: string) => process.stdout.write(chunk) });
     return;
   }
@@ -442,6 +474,12 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     await readFiles(options.file, { cwd: process.cwd() });
   }
 
+  const notifications = resolveNotificationSettings({
+    cliNotify: options.notify,
+    cliNotifySound: options.notifySound,
+    env: process.env,
+  });
+
   const sessionMode: SessionMode = engine === 'browser' ? 'browser' : 'api';
   const browserModelLabelOverride =
     sessionMode === 'browser' ? resolveBrowserModelLabel(cliModelArg, resolvedModel) : undefined;
@@ -463,6 +501,7 @@ async function runRootCommand(options: CliOptions): Promise<void> {
       browserConfig,
     },
     process.cwd(),
+    notifications,
   );
   const reattachCommand = `pnpm oracle session ${sessionMeta.id}`;
   console.log(chalk.bold(`Reattach later with: ${chalk.cyan(reattachCommand)}`));
@@ -477,7 +516,7 @@ async function runRootCommand(options: CliOptions): Promise<void> {
       return false;
     });
   if (detached === false) {
-    await runInteractiveSession(sessionMeta, liveRunOptions, sessionMode, browserConfig, true);
+    await runInteractiveSession(sessionMeta, liveRunOptions, sessionMode, browserConfig, true, notifications);
     console.log(chalk.bold(`Session ${sessionMeta.id} completed`));
     return;
   }
@@ -494,6 +533,7 @@ async function runInteractiveSession(
   mode: SessionMode,
   browserConfig?: BrowserSessionConfig,
   showReattachHint = true,
+  notifications?: NotificationSettings,
 ): Promise<void> {
   const { logLine, writeChunk, stream } = createSessionLogWriter(sessionMeta.id);
   let headerAugmented = false;
@@ -525,6 +565,7 @@ async function runInteractiveSession(
       log: combinedLog,
       write: combinedWrite,
       version: VERSION,
+      notifications: notifications ?? deriveNotificationSettingsFromMetadata(sessionMeta, process.env),
     });
   } catch (error) {
     throw error;
@@ -564,6 +605,7 @@ async function executeSession(sessionId: string) {
   const sessionMode = getSessionMode(metadata);
   const browserConfig = getBrowserConfigFromMetadata(metadata);
   const { logLine, writeChunk, stream } = createSessionLogWriter(sessionId);
+  const notifications = deriveNotificationSettingsFromMetadata(metadata, process.env);
   try {
     await performSessionRun({
       sessionMeta: metadata,
@@ -574,6 +616,7 @@ async function executeSession(sessionId: string) {
       log: logLine,
       write: writeChunk,
       version: VERSION,
+      notifications,
     });
   } catch {
     // Errors are already logged to the session log; keep quiet to mirror stored-session behavior.

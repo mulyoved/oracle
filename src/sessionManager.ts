@@ -65,6 +65,7 @@ export interface StoredRunOptions {
   verbose?: boolean;
   heartbeatIntervalMs?: number;
   browserInlineFiles?: boolean;
+  browserBundleFiles?: boolean;
   background?: boolean;
 }
 
@@ -76,6 +77,7 @@ export interface SessionMetadata {
   model?: string;
   cwd?: string;
   options: StoredRunOptions;
+  notifications?: SessionNotifications;
   startedAt?: string;
   completedAt?: string;
   mode?: SessionMode;
@@ -91,6 +93,11 @@ export interface SessionMetadata {
   response?: SessionResponseMetadata;
   transport?: SessionTransportMetadata;
   error?: SessionUserErrorMetadata;
+}
+
+export interface SessionNotifications {
+  enabled: boolean;
+  sound: boolean;
 }
 
 interface SessionLogWriter {
@@ -182,7 +189,11 @@ async function ensureUniqueSessionId(baseSlug: string): Promise<string> {
   return candidate;
 }
 
-export async function initializeSession(options: InitializeSessionOptions, cwd: string): Promise<SessionMetadata> {
+export async function initializeSession(
+  options: InitializeSessionOptions,
+  cwd: string,
+  notifications?: SessionNotifications,
+): Promise<SessionMetadata> {
   await ensureSessionStorage();
   const baseSlug = createSessionId(options.prompt || DEFAULT_SLUG, options.slug);
   const sessionId = await ensureUniqueSessionId(baseSlug);
@@ -199,6 +210,7 @@ export async function initializeSession(options: InitializeSessionOptions, cwd: 
     cwd,
     mode,
     browser: browserConfig ? { config: browserConfig } : undefined,
+    notifications,
     options: {
       prompt: options.prompt,
       file: options.file ?? [],
@@ -214,6 +226,7 @@ export async function initializeSession(options: InitializeSessionOptions, cwd: 
       verbose: options.verbose,
       heartbeatIntervalMs: options.heartbeatIntervalMs,
       browserInlineFiles: options.browserInlineFiles,
+      browserBundleFiles: options.browserBundleFiles,
       background: options.background,
     },
   };

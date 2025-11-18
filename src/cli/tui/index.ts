@@ -22,6 +22,7 @@ import { performSessionRun } from '../sessionRunner.js';
 import { MAX_RENDER_BYTES, trimBeforeFirstAnswer } from '../sessionDisplay.js';
 import type { BrowserSessionConfig } from '../../sessionManager.js';
 import { buildBrowserConfig, resolveBrowserModelLabel } from '../browserConfig.js';
+import { resolveNotificationSettings } from '../notifier.js';
 
 const isTty = (): boolean => Boolean(process.stdout.isTTY && chalk.level > 0);
 const dim = (text: string): string => (isTty() ? kleur.dim(text) : text);
@@ -52,6 +53,9 @@ export async function launchTui({ version }: LaunchTuiOptions): Promise<void> {
     if (older.length > 0 && olderOffset > 0) {
       choices.push(new inquirer.Separator('Older sessions'));
       choices.push(...older.slice(0, PAGE_SIZE).map(toSessionChoice));
+    }
+    if (choices.length > 0) {
+      choices.unshift(new inquirer.Separator('Status  Model      Mode    Timestamp           Chars  Slug'));
     }
     choices.push(new inquirer.Separator('Actions'));
     choices.push({ name: chalk.bold.green('Ask Oracle'), value: '__ask__' });
@@ -125,7 +129,9 @@ function formatSessionLabel(meta: SessionMetadata): string {
   const model = meta.model ?? 'n/a';
   const mode = meta.mode ?? meta.options?.mode ?? 'api';
   const slug = meta.id;
-  return `${status} ${chalk.white(model.padEnd(10))} ${chalk.gray(mode.padEnd(7))} ${chalk.gray(created)}  ${chalk.cyan(
+  const chars = meta.options?.prompt?.length ?? meta.promptPreview?.length ?? 0;
+  const charLabel = chars > 0 ? chalk.gray(String(chars).padStart(5)) : chalk.gray('    -');
+  return `${status} ${chalk.white(model.padEnd(10))} ${chalk.gray(mode.padEnd(7))} ${chalk.gray(created)} ${charLabel}  ${chalk.cyan(
     slug,
   )}`;
 }
@@ -389,6 +395,12 @@ async function askOracleFlow(version: string): Promise<void> {
         })
       : undefined;
 
+  const notifications = resolveNotificationSettings({
+    cliNotify: undefined,
+    cliNotifySound: undefined,
+    env: process.env,
+  });
+
   const sessionMeta = await initializeSession(
     {
       ...runOptions,
@@ -396,6 +408,7 @@ async function askOracleFlow(version: string): Promise<void> {
       browserConfig,
     },
     process.cwd(),
+    notifications,
   );
 
   const { logLine, writeChunk, stream } = createSessionLogWriter(sessionMeta.id);
@@ -423,6 +436,7 @@ async function askOracleFlow(version: string): Promise<void> {
       log: combinedLog,
       write: combinedWrite,
       version,
+      notifications,
     });
     console.log(chalk.green(`Session ${sessionMeta.id} completed.`));
   } catch (error) {

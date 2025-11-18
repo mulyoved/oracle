@@ -1,0 +1,118 @@
+import notifier from 'toasted-notifier';
+import { formatUSD, formatNumber } from '../oracle/format.js';
+import { MODEL_CONFIGS } from '../oracle/config.js';
+import type { SessionMode, SessionMetadata } from '../sessionManager.js';
+
+export interface NotificationSettings {
+  enabled: boolean;
+  sound: boolean;
+}
+
+export interface NotificationContent {
+  sessionId: string;
+  sessionName?: string;
+  mode: SessionMode;
+  model?: string;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+  };
+  costUsd?: number;
+  characters?: number;
+}
+
+const ORACLE_EMOJI = '🧿';
+
+export function resolveNotificationSettings(
+  {
+    cliNotify,
+    cliNotifySound,
+    env,
+  }: { cliNotify?: boolean; cliNotifySound?: boolean; env: NodeJS.ProcessEnv },
+): NotificationSettings {
+  const defaultEnabled = !(bool(env.CI) || bool(env.SSH_CONNECTION));
+  const envNotify = parseToggle(env.ORACLE_NOTIFY);
+  const envSound = parseToggle(env.ORACLE_NOTIFY_SOUND);
+
+  const enabled = cliNotify ?? envNotify ?? defaultEnabled;
+  const sound = cliNotifySound ?? envSound ?? false;
+
+  return { enabled, sound };
+}
+
+export function deriveNotificationSettingsFromMetadata(
+  metadata: SessionMetadata | null,
+  env: NodeJS.ProcessEnv,
+): NotificationSettings {
+  if (metadata?.notifications) {
+    return metadata.notifications;
+  }
+  return resolveNotificationSettings({ cliNotify: undefined, cliNotifySound: undefined, env });
+}
+
+export async function sendSessionNotification(
+  payload: NotificationContent,
+  settings: NotificationSettings,
+  log: (message: string) => void,
+): Promise<void> {
+  if (!settings.enabled) {
+    return;
+  }
+
+  const title = `Oracle${ORACLE_EMOJI} finished`;
+  const message = buildMessage(payload);
+
+  try {
+    await notifier.notify({
+      title,
+      message,
+      sound: settings.sound,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    log(`(notify skipped: ${reason})`);
+  }
+}
+
+function buildMessage(payload: NotificationContent): string {
+  const parts: string[] = [];
+  const sessionLabel = payload.sessionName || payload.sessionId;
+  parts.push(`session ${sessionLabel}`);
+
+  if (payload.mode === 'api') {
+    const cost = payload.costUsd ?? inferCost(payload);
+    if (cost !== undefined) {
+      parts.push(formatUSD(cost));
+    }
+  }
+
+  if (payload.characters != null) {
+    parts.push(`${formatNumber(payload.characters)} chars`);
+  }
+
+  return parts.join(' · ');
+}
+
+function inferCost(payload: NotificationContent): number | undefined {
+  const model = payload.model;
+  const usage = payload.usage;
+  if (!model || !usage) return undefined;
+  const config = MODEL_CONFIGS[model as keyof typeof MODEL_CONFIGS];
+  if (!config) return undefined;
+  return (
+    usage.inputTokens * config.pricing.inputPerToken +
+    usage.outputTokens * config.pricing.outputPerToken
+  );
+}
+
+function parseToggle(value: string | undefined): boolean | undefined {
+  if (value == null) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return undefined;
+}
+
+function bool(value: unknown): boolean {
+  return Boolean(value && String(value).length > 0);
+}
