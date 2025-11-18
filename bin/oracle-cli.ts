@@ -357,7 +357,7 @@ function buildRunOptionsFromMetadata(metadata: SessionMetadata): RunOracleOption
     maxOutput: stored.maxOutput,
     system: stored.system,
     silent: stored.silent,
-    search: undefined,
+    search: stored.search,
     preview: false,
     previewMode: undefined,
     apiKey: undefined,

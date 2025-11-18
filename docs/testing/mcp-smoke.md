@@ -1,6 +1,6 @@
 # MCP Smoke Tests (local oracle-mcp)
 
-Use these steps to validate CLI + MCP end-to-end before releasing.
+Use these steps to validate CLI + MCP end-to-end before releasing. The published npm package does **not** ship `oracle-mcp` yet, so always point mcporter at the local build (the `oracle-local` entry in `config/mcporter.json`).
 
 ## Checklist (run all four lanes)
 1) CLI (API engine)
@@ -27,14 +27,14 @@ Shared prereqs
   ```
 
 ## MCP via mcporter
-1) List tools/schema to confirm discovery:
+1) List tools/schema to confirm discovery (use the local entry):
    ```bash
-   mcporter list oracle --schema --config config/mcporter.json
+   mcporter list oracle-local --schema --config config/mcporter.json
    ```
 
 2) API consult (GPT-5.1):
    ```bash
-   mcporter call oracle.consult \
+   mcporter call oracle-local.consult \
      prompt:"Say hello from GPT-5.1" \
      model:"gpt-5.1" \
      engine:"api" \
@@ -43,17 +43,17 @@ Shared prereqs
 
 3) Sessions list:
    ```bash
-   mcporter call oracle.sessions hours:12 limit:3 --config config/mcporter.json
+   mcporter call oracle-local.sessions hours:12 limit:3 --config config/mcporter.json
    ```
 
 4) Session detail:
    ```bash
-   mcporter call oracle.sessions id:"say-hello-from-gpt-5" detail:true --config config/mcporter.json
+   mcporter call oracle-local.sessions id:"say-hello-from-gpt-5" detail:true --config config/mcporter.json
    ```
 
 5) Browser smoke:
    ```bash
-   mcporter call oracle.consult \
+   mcporter call oracle-local.consult \
      prompt:"Browser smoke" \
      model:"5.1 Instant" \
      engine:"browser" \
