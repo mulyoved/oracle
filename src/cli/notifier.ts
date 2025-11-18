@@ -69,7 +69,7 @@ export async function sendSessionNotification(
   }
 
   const title = `Oracle${ORACLE_EMOJI} finished`;
-  const message = buildMessage(payload, answerPreview);
+  const message = buildMessage(payload, sanitizePreview(answerPreview));
 
   try {
     if (await tryMacNativeNotifier(title, message, settings)) {
@@ -123,6 +123,31 @@ function buildMessage(payload: NotificationContent, answerPreview?: string): str
   }
 
   return parts.join(' · ');
+}
+
+function sanitizePreview(preview?: string): string | undefined {
+  if (!preview) return undefined;
+  let text = preview;
+  // Strip code fences and inline code markers.
+  text = text.replace(/```[\s\S]*?```/g, ' ');
+  text = text.replace(/`([^`]+)`/g, '$1');
+  // Convert markdown links and images to their visible text.
+  text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1');
+  text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  // Drop bold/italic markers.
+  text = text.replace(/(\*\*|__|\*|_)/g, '');
+  // Remove headings / list markers / blockquotes.
+  text = text.replace(/^\s*#+\s*/gm, '');
+  text = text.replace(/^\s*[-*+]\s+/gm, '');
+  text = text.replace(/^\s*>\s+/gm, '');
+  // Collapse whitespace and trim.
+  text = text.replace(/\s+/g, ' ').trim();
+  // Limit length to keep notifications short.
+  const max = 140;
+  if (text.length > max) {
+    text = `${text.slice(0, max - 1)}…`;
+  }
+  return text;
 }
 
 function inferCost(payload: NotificationContent): number | undefined {
