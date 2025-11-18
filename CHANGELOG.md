@@ -39,7 +39,7 @@ All notable changes to this project will be documented in this file.
   ```json
   {
     "mcpServers": {
-      "oracle": { "type": "stdio", "command": "oracle-mcp", "args": [] }
+      "oracle": { "type": "stdio", "command": "npx", "args": ["-y", "@steipete/oracle", "oracle-mcp"] }
     }
   }
   ```

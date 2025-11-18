@@ -31,4 +31,12 @@
     "args": ["-y", "@steipete/oracle", "oracle-mcp"]
   }
   ```
+- Project-scoped Claude (.mcp.json) example:
+  ```json
+  {
+    "mcpServers": {
+      "oracle": { "type": "stdio", "command": "npx", "args": ["-y", "@steipete/oracle", "oracle-mcp"] }
+    }
+  }
+  ```
 - Tools and resources operate on the same session store as `oracle status|session`.

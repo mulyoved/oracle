@@ -52,7 +52,7 @@ oracle session <id>                 # replay a run locally
 - Don’t want to export the key? Inline works: `OPENAI_API_KEY=sk-... oracle -p "Quick check" --file src/`.
 
 **MCP** (tools + resources; mix-and-match with the CLI sessions)
-- Run the bundled stdio server: `pnpm mcp` (or `oracle-mcp`) after `pnpm build`. Tools: `consult`, `sessions`; resources: `oracle-session://{id}/{metadata|log|request}`. Details in `docs/mcp.md`.
+- Run the bundled stdio server: `pnpm mcp` (or `oracle-mcp`) after `pnpm build`. Tools: `consult`, `sessions`; resources: `oracle-session://{id}/{metadata|log|request}`. Details in [docs/mcp.md](docs/mcp.md).
 - mcporter config (stdio):
   ```json
   {
