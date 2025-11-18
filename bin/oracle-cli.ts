@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Command, Option } from 'commander';
 import type { OptionValues } from 'commander';
-import { resolveEngine, type EngineMode } from '../src/cli/engine.js';
+import { resolveEngine, type EngineMode, defaultWaitPreference } from '../src/cli/engine.js';
 import { shouldRequirePrompt } from '../src/cli/promptRequirement.js';
 import chalk from 'chalk';
 import {
@@ -34,7 +34,7 @@ import {
 import { applyHiddenAliases } from '../src/cli/hiddenAliases.js';
 import { buildBrowserConfig, resolveBrowserModelLabel } from '../src/cli/browserConfig.js';
 import { performSessionRun } from '../src/cli/sessionRunner.js';
-import { attachSession, showStatus } from '../src/cli/sessionDisplay.js';
+import { attachSession, showStatus, formatCompletionSummary } from '../src/cli/sessionDisplay.js';
 import type { ShowStatusOptions } from '../src/cli/sessionDisplay.js';
 import { handleSessionCommand, type StatusOptions, formatSessionCleanupMessage } from '../src/cli/sessionCommand.js';
 import { isErrorLogged } from '../src/cli/errorUtils.js';
@@ -90,6 +90,8 @@ interface CliOptions extends OptionValues {
   heartbeat?: number;
   status?: boolean;
   dryRun?: boolean;
+  wait?: boolean;
+  noWait?: boolean;
 }
 
 type ResolvedCliOptions = Omit<CliOptions, 'model'> & { model: ModelName };
@@ -157,7 +159,7 @@ program
   .addOption(
     new Option(
       '-e, --engine <mode>',
-      'Execution engine (api | browser). If omitted, Oracle picks api when OPENAI_API_KEY is set, otherwise browser.',
+      'Execution engine (api | browser). If omitted, oracle picks api when OPENAI_API_KEY is set, otherwise browser.',
     ).choices(['api', 'browser'])
   )
   .option('--files-report', 'Show token usage per attached file (also prints automatically when files exceed the token budget).', false)
@@ -216,6 +218,8 @@ program
   .addOption(new Option('--browser-bundle-files', 'Bundle all attachments into a single archive before uploading.').default(false))
   .option('--debug-help', 'Show the advanced/debug option set and exit.', false)
   .option('--heartbeat <seconds>', 'Emit periodic in-progress updates (0 to disable).', parseHeartbeatOption, 30)
+  .addOption(new Option('--wait').default(undefined))
+  .addOption(new Option('--no-wait').default(undefined).hideHelp())
   .showHelpAfterError('(use --help for usage)');
 
 program.addHelpText(
@@ -419,6 +423,13 @@ async function runRootCommand(options: CliOptions): Promise<void> {
   const resolvedModel: ModelName = engine === 'browser' ? inferModelFromLabel(cliModelArg) : resolveApiModel(cliModelArg);
   const resolvedOptions: ResolvedCliOptions = { ...options, model: resolvedModel };
 
+  const waitPreference = resolveWaitFlag({
+    waitFlag: options.wait,
+    noWaitFlag: options.noWait,
+    model: resolvedModel,
+    engine,
+  });
+
   if (await handleStatusFlag(options, { attachSession, showStatus })) {
     return;
   }
@@ -546,6 +557,18 @@ async function runRootCommand(options: CliOptions): Promise<void> {
       console.log(chalk.yellow(`Unable to detach session runner (${message}). Running inline...`));
       return false;
     });
+
+  if (!waitPreference) {
+    if (!detached) {
+      console.log(chalk.red('Unable to start in background; use --wait to run inline.'));
+      process.exitCode = 1;
+      return;
+    }
+    console.log(chalk.blue(`Session running in background. Reattach via: oracle session ${sessionMeta.id}`));
+    console.log(chalk.dim('Pro runs can take up to 10 minutes. Add --wait to stay attached.'));
+    return;
+  }
+
   if (detached === false) {
     await runInteractiveSession(sessionMeta, liveRunOptions, sessionMode, browserConfig, true, notifications, userConfig);
     console.log(chalk.bold(`Session ${sessionMeta.id} completed`));
@@ -570,7 +593,7 @@ async function runInteractiveSession(
   const { logLine, writeChunk, stream } = createSessionLogWriter(sessionMeta.id);
   let headerAugmented = false;
   const combinedLog = (message = ''): void => {
-    if (!headerAugmented && message.startsWith('Oracle (')) {
+    if (!headerAugmented && message.startsWith('oracle (')) {
       headerAugmented = true;
       if (showReattachHint) {
         console.log(`${message}\n${chalk.blue(`Reattach via: oracle session ${sessionMeta.id}`)}`);
@@ -600,6 +623,12 @@ async function runInteractiveSession(
       notifications:
         notifications ?? deriveNotificationSettingsFromMetadata(sessionMeta, process.env, userConfig?.notify),
     });
+    const latest = await readSessionMetadata(sessionMeta.id);
+    const summary = latest ? formatCompletionSummary(latest, { includeSlug: true }) : null;
+    if (summary) {
+      console.log('\n' + chalk.green.bold(summary));
+      logLine(summary); // plain text in log, colored on stdout
+    }
   } catch (error) {
     throw error;
   } finally {
@@ -689,6 +718,22 @@ function printDebugOptionGroup(entries: Array<[string, string]>): void {
     const label = chalk.cyan(flag.padEnd(flagWidth + 2));
     console.log(`  ${label}${description}`);
   });
+}
+
+function resolveWaitFlag({
+  waitFlag,
+  noWaitFlag,
+  model,
+  engine,
+}: {
+  waitFlag?: boolean;
+  noWaitFlag?: boolean;
+  model: ModelName;
+  engine: EngineMode;
+}): boolean {
+  if (waitFlag === true) return true;
+  if (noWaitFlag === true) return false;
+  return defaultWaitPreference(model, engine);
 }
 
 function applyBrowserDefaultsFromConfig(options: CliOptions, config: UserConfig): void {
