@@ -9,7 +9,7 @@ MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
 ICONSET=OracleIcon.iconset
 ICNS=OracleIcon.icns
-IDENTITY="Developer ID Application: Peter Steinberger (Y5PE65HELJ)"
+IDENTITY="${CODESIGN_ID:-Developer ID Application: Peter Steinberger (Y5PE65HELJ)}"
 
 rm -rf "$APP" "$ICONSET" "$ICNS"
 mkdir -p "$MACOS" "$RESOURCES"
@@ -51,7 +51,10 @@ PLIST
 # Compile Swift helper (arm64)
 swiftc -target arm64-apple-macos13 -o "$MACOS/OracleNotifier" OracleNotifier.swift -framework Foundation -framework UserNotifications
 
-# Sign (ad-hoc or Developer ID if available)
-codesign --force --deep --options runtime --sign "$IDENTITY" "$APP" || codesign --force --deep --options runtime --sign - "$APP"
+# Sign with Developer ID (fail if unavailable)
+if ! codesign --force --deep --options runtime --sign "$IDENTITY" "$APP"; then
+  echo "codesign failed. Set CODESIGN_ID to a valid Developer ID Application certificate." >&2
+  exit 1
+fi
 
 echo "Built $APP"
