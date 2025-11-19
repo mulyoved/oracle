@@ -945,7 +945,7 @@ async function main(): Promise<void> {
   }
 }
 
-await main().catch((error: unknown) => {
+void main().catch((error: unknown) => {
   if (error instanceof Error) {
     if (!isErrorLogged(error)) {
       console.error(chalk.red('✖'), error.message);
