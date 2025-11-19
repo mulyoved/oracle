@@ -49,6 +49,34 @@ export async function launchTui({ version }: LaunchTuiOptions): Promise<void> {
   console.log('');
   let olderOffset = 0;
   let showingOlder = false;
+  // Reuse a single global key handler to avoid stacking listeners across prompts
+  let globalInput: NodeJS.ReadStream | undefined;
+  let globalPromptClose: (() => void) | undefined;
+  const keyState = {
+    shortcutSelection: null as string | null,
+    hasOlderPrev: false,
+    hasOlderNext: false,
+    showingOlder: false,
+    olderTotal: 0,
+  };
+  const onKeypressGlobal = (_: unknown, key: { name?: string }): void => {
+    if (!key?.name) return;
+    if (keyState.shortcutSelection) return;
+    if (!keyState.showingOlder && keyState.olderTotal > 0 && key.name === 'pagedown') {
+      keyState.shortcutSelection = '__older__';
+      globalPromptClose?.();
+      return;
+    }
+    if (keyState.showingOlder) {
+      if (key.name === 'pagedown' && keyState.hasOlderNext) {
+        keyState.shortcutSelection = '__more__';
+        globalPromptClose?.();
+      } else if (key.name === 'pageup') {
+        keyState.shortcutSelection = keyState.hasOlderPrev ? '__prev__' : '__reset__';
+        globalPromptClose?.();
+      }
+    }
+  };
   for (;;) {
     const { recent, older, olderTotal } = await fetchSessionBuckets(olderOffset);
     type HeaderChoice = { name: string; value: string; disabled: boolean };
@@ -98,6 +126,13 @@ export async function launchTui({ version }: LaunchTuiOptions): Promise<void> {
 
     choices.push({ name: 'Exit', value: '__exit__' });
 
+    // Update key handler state for this prompt
+    keyState.hasOlderPrev = hasOlderPrev;
+    keyState.hasOlderNext = hasOlderNext;
+    keyState.showingOlder = showingOlder;
+    keyState.olderTotal = olderTotal;
+    keyState.shortcutSelection = null;
+
     const selection = await new Promise<string>((resolve) => {
       const prompt = inquirer.prompt<{ selection: string }>([
         {
@@ -114,40 +149,22 @@ export async function launchTui({ version }: LaunchTuiOptions): Promise<void> {
         ui?: { rl: import('readline').Interface; close: () => void };
       };
       const rl = promptUi.ui?.rl;
-      const input = (rl as unknown as { input?: NodeJS.ReadStream })?.input;
-      let resolved = false;
-      const finalize = (value: string): void => {
-        // biome-ignore lint/nursery/noUnnecessaryConditions: guard against double-finalize when prompt and shortcut race
-        if (resolved) return;
-        resolved = true;
-        input?.off('keypress', onKeypress);
-        resolve(value);
-      };
-      const onKeypress = (_: unknown, key: { name?: string }): void => {
-        if (!key?.name) return;
-        if (!showingOlder && olderTotal > 0 && key.name === 'pagedown') {
-          finalize('__older__');
-          return;
-        }
-        // biome-ignore lint/nursery/noUnnecessaryConditions: guarding runtime state for key handlers
-        if (showingOlder) {
-          if (key.name === 'pagedown' && hasOlderNext) {
-            finalize('__more__');
-          } else if (key.name === 'pageup') {
-            finalize(hasOlderPrev ? '__prev__' : '__reset__');
-          }
-        }
-      };
-      input?.on('keypress', onKeypress);
+      globalInput = (rl as unknown as { input?: NodeJS.ReadStream })?.input;
+      globalPromptClose = promptUi.ui?.close?.bind(promptUi.ui);
+      if (globalInput) {
+        globalInput.setMaxListeners?.(0);
+        globalInput.off('keypress', onKeypressGlobal);
+        globalInput.on('keypress', onKeypressGlobal);
+      }
 
       prompt
-        .then(({ selection: answer }) => finalize(answer))
+        .then(({ selection: answer }) => resolve(keyState.shortcutSelection ?? answer))
         .catch((error) => {
           console.error(
             chalk.red('Paging failed; returning to recent list.'),
             error instanceof Error ? error.message : error,
           );
-          finalize('__reset__');
+          resolve('__reset__');
         });
     });
 
