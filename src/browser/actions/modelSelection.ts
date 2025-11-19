@@ -282,6 +282,7 @@ function buildModelMatchersLiteral(targetModel: string): { labelTokens: string[]
   push(hyphenated, testIdTokens);
   push(collapsed, testIdTokens);
   push(dotless, testIdTokens);
+  // data-testid values observed in the ChatGPT picker (e.g., model-switcher-gpt-5-pro)
   push(`model-switcher-${hyphenated}`, testIdTokens);
   push(`model-switcher-${collapsed}`, testIdTokens);
   push(`model-switcher-${dotless}`, testIdTokens);

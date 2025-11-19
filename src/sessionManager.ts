@@ -3,7 +3,8 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import type { WriteStream } from 'node:fs';
-import type { TransportFailureReason } from './oracle.js';
+import type { CookieParam } from './browser/types.js';
+import type { TransportFailureReason, AzureOptions } from './oracle.js';
 
 export type SessionMode = 'api' | 'browser';
 
@@ -14,6 +15,9 @@ export interface BrowserSessionConfig {
   timeoutMs?: number;
   inputTimeoutMs?: number;
   cookieSync?: boolean;
+  cookieNames?: string[] | null;
+  inlineCookies?: CookieParam[] | null;
+  inlineCookiesSource?: string | null;
   headless?: boolean;
   keepBrowser?: boolean;
   hideWindow?: boolean;
@@ -68,6 +72,10 @@ export interface StoredRunOptions {
   browserInlineFiles?: boolean;
   browserBundleFiles?: boolean;
   background?: boolean;
+  search?: boolean;
+  baseUrl?: string;
+  azure?: AzureOptions;
+  effectiveModelId?: string;
 }
 
 export interface SessionMetadata {
@@ -231,6 +239,9 @@ export async function initializeSession(
       browserInlineFiles: options.browserInlineFiles,
       browserBundleFiles: options.browserBundleFiles,
       background: options.background,
+      search: options.search,
+      baseUrl: options.baseUrl,
+      azure: options.azure,
     },
   };
   await fs.writeFile(metaPath(sessionId), JSON.stringify(metadata, null, 2), 'utf8');

@@ -42,6 +42,9 @@ export interface BrowserAutomationConfig {
   timeoutMs?: number;
   inputTimeoutMs?: number;
   cookieSync?: boolean;
+  cookieNames?: string[] | null;
+  inlineCookies?: CookieParam[] | null;
+  inlineCookiesSource?: string | null;
   headless?: boolean;
   keepBrowser?: boolean;
   hideWindow?: boolean;
@@ -79,4 +82,5 @@ export type ResolvedBrowserConfig = Required<
   chromePath?: string | null;
   desiredModel?: string | null;
   remoteChrome?: { host: string; port: number } | null;
+  inlineCookiesSource?: string | null;
 };

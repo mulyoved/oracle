@@ -22,6 +22,12 @@ export interface BrowserConfigDefaults {
   keepBrowser?: boolean;
 }
 
+export interface AzureConfig {
+  endpoint?: string;
+  deployment?: string;
+  apiVersion?: string;
+}
+
 export interface UserConfig {
   engine?: EnginePreference;
   model?: string;
@@ -32,6 +38,8 @@ export interface UserConfig {
   filesReport?: boolean;
   background?: boolean;
   promptSuffix?: string;
+  apiBaseUrl?: string;
+  azure?: AzureConfig;
 }
 
 function resolveConfigPath(): string {

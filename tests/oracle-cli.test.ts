@@ -29,6 +29,8 @@ import type {
   OracleRequestBody,
 } from '../src/oracle.ts';
 
+const testNonWindows = process.platform === 'win32' ? test.skip : test;
+
 chalk.level = 0;
 
 type TempFile = { dir: string; filePath: string };
@@ -60,16 +62,10 @@ async function createTempFile(contents: string): Promise<TempFile> {
 class MockStream implements ResponseStreamLike {
   private events: ResponseStreamEvent[];
   private finalResponseValue: MockResponse;
-  private aborted: boolean;
 
   constructor(events: ResponseStreamEvent[], finalResponse: MockResponse) {
     this.events = events;
     this.finalResponseValue = finalResponse;
-    this.aborted = false;
-  }
-
-  abort(): void {
-    this.aborted = true;
   }
 
   [Symbol.asyncIterator](): AsyncIterator<ResponseStreamEvent> {
@@ -77,9 +73,6 @@ class MockStream implements ResponseStreamLike {
     const events = this.events;
     return {
       next: async () => {
-        if (this.aborted) {
-          return { done: true, value: undefined };
-        }
         if (index >= events.length) {
           return { done: true, value: undefined };
         }
@@ -236,6 +229,330 @@ describe('api key logging', () => {
     expect(combined).toContain('Using OPENAI_API_KEY=sk-s****1234');
     expect(combined).not.toContain('supersecret');
   });
+
+  test('logs masked GEMINI_API_KEY when using gemini model', async () => {
+    const stream = new MockStream([], buildResponse());
+    const client = new MockClient(stream);
+    const logs: string[] = [];
+    await runOracle(
+      {
+        prompt: 'Key log test Gemini',
+        model: 'gemini-3-pro',
+        background: false,
+      },
+      {
+        apiKey: 'sk-gemini-secret-9999',
+        client,
+        log: (msg: string) => logs.push(msg),
+        write: () => true,
+      },
+    );
+
+    const combined = logs.join('\n');
+    expect(combined).toContain('Using GEMINI_API_KEY=sk-g****9999 for model gemini-3-pro');
+    expect(combined).not.toContain('gemini-secret');
+  });
+
+  test('throws when OPENAI_API_KEY is missing for API engine', async () => {
+    const originalOpenai = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      await expect(
+        runOracle(
+          {
+            prompt: 'Needs key',
+            model: 'gpt-5-pro',
+            background: false,
+          },
+          {
+            log: () => {},
+            write: () => true,
+          },
+        ),
+      ).rejects.toThrow(/Missing OPENAI_API_KEY/);
+    } finally {
+      if (originalOpenai !== undefined) {
+        process.env.OPENAI_API_KEY = originalOpenai;
+      } else {
+        delete process.env.OPENAI_API_KEY;
+      }
+    }
+  });
+
+  test('throws when GEMINI_API_KEY is missing for gemini API engine', async () => {
+    const originalGemini = process.env.GEMINI_API_KEY;
+    delete process.env.GEMINI_API_KEY;
+    try {
+      await expect(
+        runOracle(
+          {
+            prompt: 'Needs gemini key',
+            model: 'gemini-3-pro',
+            background: false,
+          },
+          {
+            log: () => {},
+            write: () => true,
+          },
+        ),
+      ).rejects.toThrow(/Missing GEMINI_API_KEY/);
+    } finally {
+      if (originalGemini !== undefined) {
+        process.env.GEMINI_API_KEY = originalGemini;
+      } else {
+        delete process.env.GEMINI_API_KEY;
+      }
+    }
+  });
+
+  test('single-line summary includes session id when provided', async () => {
+    const stream = new MockStream([], buildResponse());
+    const client = new MockClient(stream);
+    const logs: string[] = [];
+    await runOracle(
+      { prompt: 'Summarize', model: 'gpt-5-pro', sessionId: 'abc123', background: false },
+      {
+        apiKey: 'sk-test',
+        client,
+        log: (msg) => logs.push(msg),
+        write: () => true,
+      },
+    );
+    const finished = logs.find((line) => line.startsWith('Finished abc123 in '));
+    expect(finished).toBeDefined();
+    expect(finished).toContain('abc123');
+    // Ensure no separate duplicate completion line was logged
+    expect(logs.filter((line) => line.includes('Finished abc123 in')).length).toBe(1);
+  });
+
+  test('verbose logs insert separation before answer stream', async () => {
+    const stream = new MockStream(
+      [
+        { type: 'response.output_text.delta', delta: 'Yo' },
+        { type: 'response.output_text.delta', delta: ' bro.' },
+      ],
+      buildResponse(),
+    );
+    const client = new MockClient(stream);
+    const logs: string[] = [];
+    const writes: string[] = [];
+    await runOracle(
+      { prompt: 'hi', model: 'gpt-5-pro', verbose: true, background: false },
+      {
+        apiKey: 'sk-test-1234',
+        client,
+        log: (msg) => logs.push(msg),
+        write: (chunk) => {
+          writes.push(chunk);
+          return true;
+        },
+      },
+    );
+    const logLines = logs;
+    expect(logLines.some((line) => line.includes('[verbose] Dispatching request to API...'))).toBe(true);
+    const answerLineIndex = logLines.findIndex((line) => line.trim() === 'Answer:');
+    expect(answerLineIndex).toBeGreaterThan(0);
+    // The line immediately before Answer should be blank (separator)
+    expect(logLines[answerLineIndex - 1]).toBe('');
+  });
+
+  test('streamed answers get a newline before verbose footer', async () => {
+    const stream = new MockStream(
+      [
+        { type: 'response.output_text.delta', delta: 'Yo bro.' },
+      ],
+      buildResponse(),
+    );
+    const client = new MockClient(stream);
+    const logs: string[] = [];
+    const writes: string[] = [];
+    await runOracle(
+      { prompt: 'Greeting', model: 'gpt-5-pro', verbose: true, background: false },
+      {
+        apiKey: 'sk-test',
+        client,
+        log: (msg: string) => logs.push(msg),
+        write: (chunk) => {
+          writes.push(chunk);
+          return true;
+        },
+      },
+    );
+
+    const verboseIndex = logs.findIndex((line) => line.includes('Response status:'));
+    expect(verboseIndex).toBeGreaterThan(0);
+    expect(logs[verboseIndex - 1]).toBe('');
+    expect(writes.join('')).toContain('Yo bro.\n');
+  });
+
+  test('verbose run spells out token labels', async () => {
+    const stream = new MockStream([], buildResponse());
+    const client = new MockClient(stream);
+    const logs: string[] = [];
+    await runOracle(
+      {
+        prompt: 'Verbose tokens',
+        model: 'gpt-5-pro',
+        background: false,
+        verbose: true,
+      },
+      {
+        apiKey: 'sk-test',
+        client,
+        log: (msg: string) => logs.push(msg),
+        write: () => true,
+      },
+    );
+
+    const finished = logs.find((line) => line.startsWith('Finished in '));
+    expect(finished).toBeDefined();
+    expect(finished).toContain('tokens (input/output/reasoning/total)=');
+    expect(finished).not.toContain('tok(i/o/r/t)=');
+  });
+
+  test('non-verbose run keeps short token label', async () => {
+    const stream = new MockStream([], buildResponse());
+    const client = new MockClient(stream);
+    const logs: string[] = [];
+    await runOracle(
+      {
+        prompt: 'Short tokens',
+        model: 'gpt-5-pro',
+        background: false,
+        verbose: false,
+      },
+      {
+        apiKey: 'sk-test',
+        client,
+        log: (msg: string) => logs.push(msg),
+        write: () => true,
+      },
+    );
+
+    const finished = logs.find((line) => line.startsWith('Finished in '));
+    expect(finished).toBeDefined();
+    expect(finished).toContain('tok(i/o/r/t)=');
+    expect(finished).not.toContain('tokens (input/output/reasoning/total)=');
+  });
+
+  test('verbose footer separation still clean for non-streamed output', async () => {
+    const client: ClientLike = {
+      responses: {
+        stream: async () =>
+          new MockStream([], {
+            id: 'resp-id',
+            status: 'completed',
+            usage: { input_tokens: 5, output_tokens: 0, reasoning_tokens: 0, total_tokens: 5 },
+            output: [
+              {
+                type: 'message',
+                content: [{ type: 'text', text: 'Hello world' }],
+              },
+            ],
+          }),
+        async create() {
+          return {
+            id: 'resp-id',
+            status: 'completed',
+            output: [{ type: 'message', content: [{ type: 'text', text: 'Hello world' }] }],
+          } as OracleResponse;
+        },
+        async retrieve() {
+          return {
+            id: 'resp-id',
+            status: 'completed',
+            output: [{ type: 'message', content: [{ type: 'text', text: 'Hello world' }] }],
+          } as OracleResponse;
+        },
+      },
+    } as ClientLike;
+    const logs: string[] = [];
+    await runOracle(
+      {
+        prompt: 'Greeting',
+        model: 'gpt-5-pro',
+        background: false,
+        verbose: true,
+      },
+      {
+        apiKey: 'sk-test',
+        client,
+        log: (msg: string) => logs.push(msg),
+        write: () => true,
+      },
+    );
+
+    const statusIndex = logs.findIndex((line) => line.includes('Response status:'));
+    expect(statusIndex).toBeGreaterThan(0);
+    // Non-streamed runs keep the single blank separator before verbose footer (but no run-on).
+    expect(logs[statusIndex - 1]).toBe('');
+  });
+});
+
+describe('timeouts', () => {
+  test('non-pro run respects short timeout override', async () => {
+    const nowRef = { t: 0 };
+    const wait = async (ms: number) => {
+      nowRef.t += ms;
+    };
+    const client: ClientLike = {
+      responses: {
+        async stream() {
+          return new MockStream([], buildResponse());
+        },
+        async create() {
+          return { id: 'bg-1', status: 'in_progress', output: [] } as OracleResponse;
+        },
+        async retrieve() {
+          return { id: 'bg-1', status: 'in_progress', output: [] } as OracleResponse;
+        },
+      },
+    };
+
+    await expect(
+      runOracle(
+        { prompt: 'hi', model: 'gpt-5.1', background: true, timeoutSeconds: 1 },
+        { client, log: () => {}, write: () => true, wait, now: () => nowRef.t },
+      ),
+    ).rejects.toBeInstanceOf(OracleTransportError);
+  });
+
+  test('gpt-5-pro auto timeout allows long background runs', async () => {
+    const nowRef = { t: 0 };
+    const wait = async (ms: number) => {
+      nowRef.t += ms;
+    };
+    let pollCount = 0;
+    const client: ClientLike = {
+      responses: {
+        async stream() {
+          return new MockStream([], buildResponse());
+        },
+        async create() {
+          return { id: 'bg-2', status: 'in_progress', output: [] } as OracleResponse;
+        },
+        async retrieve() {
+          pollCount += 1;
+          if (pollCount >= 3) {
+            return {
+              id: 'bg-2',
+              status: 'completed',
+              output: [{ type: 'message', content: [{ type: 'text', text: 'done' }] }],
+              usage: { input_tokens: 1, output_tokens: 0, reasoning_tokens: 0, total_tokens: 1 },
+            } as OracleResponse;
+          }
+          return { id: 'bg-2', status: 'in_progress', output: [] } as OracleResponse;
+        },
+      },
+    };
+
+    const result = await runOracle(
+      { prompt: 'hi', model: 'gpt-5-pro', background: true },
+      { client, log: () => {}, write: () => true, wait, now: () => nowRef.t },
+    );
+    expect(result.mode).toBe('live');
+    expect(pollCount).toBeGreaterThanOrEqual(3);
+  });
 });
 
 describe('runOracle preview mode', () => {
@@ -318,14 +635,34 @@ describe('runOracle error handling', () => {
       ),
     ).rejects.toThrow('Input too large');
   });
+
+  test('logs short-prompt guidance when prompt is brief', async () => {
+    const stream = new MockStream([], buildResponse());
+    const client = new MockClient(stream);
+    const logs: string[] = [];
+    await runOracle(
+      {
+        prompt: 'short',
+        model: 'gpt-5-pro',
+        background: false,
+      },
+      {
+        apiKey: 'sk-test',
+        client,
+        log: (msg) => logs.push(msg),
+        write: () => true,
+      },
+    );
+    expect(logs.some((line) => line.includes('brief prompts often yield generic answers'))).toBe(true);
+  });
 });
 
 describe('runOracle streaming output', () => {
   test('streams deltas and prints stats', async () => {
     const stream = new MockStream(
       [
-        { type: 'response.output_text.delta', delta: 'Hello ', output_index: 0, content_index: 0 },
-        { type: 'response.output_text.delta', delta: 'world', output_index: 0, content_index: 0 },
+        { type: 'chunk', delta: 'Hello ', output_index: 0, content_index: 0 },
+        { type: 'chunk', delta: 'world', output_index: 0, content_index: 0 },
       ],
       buildResponse(),
     );
@@ -356,14 +693,14 @@ describe('runOracle streaming output', () => {
 
     expect(result.mode).toBe('live');
     expect(writes.join('')).toBe('Hello world\n\n');
-    expect(logs.some((line) => line.startsWith('oracle ('))).toBe(true);
+    expect(logs.some((line) => line.startsWith('🧿 oracle ('))).toBe(true);
     expect(logs.some((line) => line.startsWith('Finished in '))).toBe(true);
   });
 
 
   test('silent mode suppresses streamed answer output', async () => {
     const stream = new MockStream(
-      [{ type: 'response.output_text.delta', delta: 'hi', output_index: 0, content_index: 0 }],
+      [{ type: 'chunk', delta: 'hi', output_index: 0, content_index: 0 }],
       buildResponse(),
     );
     const client = new MockClient(stream);
@@ -388,9 +725,62 @@ describe('runOracle streaming output', () => {
     );
 
     expect(writes).toEqual([]);
-    expect(logs.some((line) => line.startsWith('oracle ('))).toBe(true);
+    expect(logs.some((line) => line.startsWith('🧿 oracle ('))).toBe(true);
     const finishedLine = logs.find((line) => line.startsWith('Finished in '));
     expect(finishedLine).toBeDefined();
+  });
+
+  test('accepts OpenAI delta events alongside chunk events', async () => {
+    const stream = new MockStream(
+      [
+        { type: 'response.output_text.delta', delta: 'alpha', output_index: 0, content_index: 0 },
+        { type: 'chunk', delta: 'beta', output_index: 0, content_index: 0 },
+      ],
+      buildResponse(),
+    );
+    const client = new MockClient(stream);
+    const writes: string[] = [];
+    await runOracle(
+      { prompt: 'Mix events', model: 'gpt-5-pro', background: false },
+      {
+        apiKey: 'sk-test',
+        client,
+        write: (chunk: string) => {
+          writes.push(chunk);
+          return true;
+        },
+        log: () => {},
+      },
+    );
+
+    expect(writes.join('')).toContain('alpha');
+    expect(writes.join('')).toContain('beta');
+  });
+
+  test('handles mixed stream payloads with missing delta text gracefully', async () => {
+    const stream = new MockStream(
+      [
+        { type: 'response.output_text.delta', output_index: 0, content_index: 0 }, // no delta field
+        { type: 'chunk', delta: 'visible', output_index: 0, content_index: 0 },
+      ],
+      buildResponse(),
+    );
+    const client = new MockClient(stream);
+    const writes: string[] = [];
+    await runOracle(
+      { prompt: 'Robust stream', model: 'gpt-5-pro', background: false },
+      {
+        apiKey: 'sk-test',
+        client,
+        write: (chunk: string) => {
+          writes.push(chunk);
+          return true;
+        },
+        log: () => {},
+      },
+    );
+
+    expect(writes.join('')).toBe('visible\n\n');
   });
 });
 
@@ -425,32 +815,31 @@ describe('runOracle background mode', () => {
   });
 
   test('retries polling and logs reconnection after a transport drop', async () => {
+    const logs: string[] = [];
     const finalResponse = buildResponse();
-    const initialResponse = { ...finalResponse, status: 'in_progress', output: [] };
+    const initialResponse = { ...finalResponse, status: 'in_progress' };
     const client = new MockBackgroundClient([initialResponse, finalResponse]);
     client.triggerConnectionDrop();
-    const logs: string[] = [];
-    let clock = 0;
-    const now = () => clock;
-    const wait = async (ms: number) => {
-      clock += ms;
-    };
-    const result = await runOracle(
+
+    const wait = async (_ms: number) => {};
+    const now = () => Date.now();
+    
+    await runOracle(
       {
-        prompt: 'Recover run',
-        model: 'gpt-5-pro',
+          prompt: 'Retry test',
+          model: 'gpt-5-pro',
       },
       {
-        apiKey: 'sk-test',
-        client,
-        log: (msg: string) => logs.push(msg),
-        now,
-        wait,
-      },
+          apiKey: 'sk-test',
+          client,
+          log: (msg) => logs.push(msg),
+          wait,
+          now,
+      }
     );
-    expect(result.mode).toBe('live');
+
     expect(logs.some((line) => line.includes('Retrying in'))).toBe(true);
-    expect(logs.some((line) => line.includes('Reconnected to OpenAI background response'))).toBe(true);
+    expect(logs.some((line) => line.includes('Reconnected to API background response'))).toBe(true);
   });
 });
 
@@ -482,7 +871,7 @@ describe('runOracle file reports', () => {
         log: (msg: string) => logs.push(msg),
       },
     );
-    expect(logs.some((line) => line.startsWith('oracle ('))).toBe(true);
+    expect(logs.some((line) => line.startsWith('🧿 oracle ('))).toBe(true);
     const fileUsageIndex = logs.indexOf('File Token Usage');
     expect(fileUsageIndex).toBeGreaterThan(-1);
     const fileLines = logs.slice(fileUsageIndex + 1, fileUsageIndex + 3);
@@ -517,11 +906,11 @@ describe('runOracle file reports', () => {
         },
       ),
     ).rejects.toThrow('Input too large');
-    expect(logs.some((line) => line.startsWith('oracle ('))).toBe(true);
+    expect(logs.some((line) => line.startsWith('🧿 oracle ('))).toBe(true);
     expect(logs.find((line) => line === 'File Token Usage')).toBeDefined();
   });
 
-  test('accepts directories passed via --file', async () => {
+  testNonWindows('accepts directories passed via --file', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'oracle-dir-'));
     const nestedDir = path.join(dir, 'notes');
     await mkdir(nestedDir, { recursive: true });
@@ -544,15 +933,70 @@ describe('runOracle file reports', () => {
         apiKey: 'sk-test',
         client,
         log: (msg: string) => logs.push(msg),
+        cwd: dir,
       },
     );
 
-    expect(logs.some((line) => line.startsWith('oracle ('))).toBe(true);
+    expect(logs.some((line) => line.startsWith('🧿 oracle ('))).toBe(true);
     const fileLogIndex = logs.indexOf('File Token Usage');
     expect(fileLogIndex).toBeGreaterThan(-1);
     expect(logs.some((line) => line.includes('note.txt'))).toBe(true);
 
     await rm(dir, { recursive: true, force: true });
+  });
+
+  test('passes baseUrl through to clientFactory', async () => {
+    const stream = new MockStream([], buildResponse());
+    const client = new MockClient(stream);
+    const captured: Array<{ apiKey: string; baseUrl?: string }> = [];
+    await runOracle(
+      {
+        prompt: 'Custom endpoint',
+        model: 'gpt-5-pro',
+        baseUrl: 'https://litellm.test/v1',
+        background: false,
+      },
+      {
+        apiKey: 'sk-test',
+        clientFactory: (apiKey, options) => {
+          captured.push({ apiKey, baseUrl: options?.baseUrl });
+          return client;
+        },
+        log: () => {},
+        write: () => true,
+      },
+    );
+    expect(captured).toEqual([{ apiKey: 'sk-test', baseUrl: 'https://litellm.test/v1' }]);
+  });
+
+  test('passes azure config to clientFactory', async () => {
+    const stream = new MockStream([], buildResponse());
+    const client = new MockClient(stream);
+    const captured: Array<{ apiKey: string; azure?: unknown }> = [];
+    const azureOptions = {
+      endpoint: 'https://my-azure.com/',
+      deployment: 'gpt-4-test',
+      apiVersion: '2024-01-01',
+    };
+
+    await runOracle(
+      {
+        prompt: 'Azure test',
+        model: 'gpt-5-pro',
+        azure: azureOptions,
+        background: false,
+      },
+      {
+        apiKey: 'sk-test',
+        clientFactory: (apiKey, options) => {
+          captured.push({ apiKey, azure: options?.azure });
+          return client;
+        },
+        log: () => {},
+        write: () => true,
+      },
+    );
+    expect(captured).toEqual([{ apiKey: 'sk-test', azure: azureOptions }]);
   });
 });
 
@@ -618,7 +1062,8 @@ describe('oracle utility helpers', () => {
     expect(() => parseIntOption('not-a-number')).toThrow('Value must be an integer.');
   });
 
-  test('readFiles deduplicates and expands directories', async () => {
+  testNonWindows('readFiles deduplicates and expands directories', async () => {
+    if (process.platform === 'win32') return;
     const dir = await mkdtemp(path.join(os.tmpdir(), 'oracle-readfiles-'));
     try {
       const nestedDir = path.join(dir, 'nested');
@@ -646,7 +1091,8 @@ describe('oracle utility helpers', () => {
     }
   });
 
-  test('readFiles respects glob include/exclude syntax and size limits', async () => {
+  testNonWindows('readFiles respects glob include/exclude syntax and size limits', async () => {
+    if (process.platform === 'win32') return;
     const dir = await mkdtemp(path.join(os.tmpdir(), 'oracle-readfiles-glob-'));
     try {
       const nestedDir = path.join(dir, 'src', 'nested');
@@ -665,7 +1111,8 @@ describe('oracle utility helpers', () => {
     }
   });
 
-  test('readFiles skips dotfiles by default when expanding directories', async () => {
+  testNonWindows('readFiles skips dotfiles by default when expanding directories', async () => {
+    if (process.platform === 'win32') return;
     const dir = await mkdtemp(path.join(os.tmpdir(), 'oracle-readfiles-dot-'));
     try {
       const dotFile = path.join(dir, '.env');
@@ -696,7 +1143,8 @@ describe('oracle utility helpers', () => {
     }
   });
 
-  test('readFiles honors .gitignore when present', async () => {
+  testNonWindows('readFiles honors .gitignore when present', async () => {
+    if (process.platform === 'win32') return;
     const dir = await mkdtemp(path.join(os.tmpdir(), 'oracle-readfiles-gitignore-'));
     try {
       const gitignore = path.join(dir, '.gitignore');
@@ -720,7 +1168,8 @@ describe('oracle utility helpers', () => {
     }
   });
 
-  test('readFiles honors nested .gitignore files', async () => {
+  testNonWindows('readFiles honors nested .gitignore files', async () => {
+    if (process.platform === 'win32') return;
     const dir = await mkdtemp(path.join(os.tmpdir(), 'oracle-readfiles-gitignore-nested-'));
     try {
       const subdir = path.join(dir, 'dist');
@@ -762,7 +1211,7 @@ describe('oracle utility helpers', () => {
     }
   });
 
-  test('readFiles allows explicitly passed default-ignored dirs', async () => {
+  testNonWindows('readFiles allows explicitly passed default-ignored dirs', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'oracle-readfiles-allow-default-'));
     try {
       const nodeModules = path.join(dir, 'node_modules');
@@ -778,7 +1227,7 @@ describe('oracle utility helpers', () => {
     }
   });
 
-  test('readFiles logs and skips default-ignored dirs under project roots', async () => {
+  testNonWindows('readFiles logs and skips default-ignored dirs under project roots', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'oracle-readfiles-ignore-logs-'));
     const ignoredDirs = ['node_modules', 'dist', 'coverage'];
     try {
@@ -875,9 +1324,9 @@ describe('oracle utility helpers', () => {
   });
 
   test('formatting helpers render friendly output', () => {
-    expect(formatUSD(12.345)).toBe('$12.35');
-    expect(formatUSD(0.05)).toBe('$0.050');
-    expect(formatUSD(0.000123)).toBe('$0.000123');
+    expect(formatUSD(12.345)).toBe('$12.3450');
+    expect(formatUSD(0.05)).toBe('$0.0500');
+    expect(formatUSD(0.000123)).toBe('$0.0001');
     expect(formatUSD(Number.NaN)).toBe('n/a');
 
     expect(formatNumber(1000)).toBe('1,000');

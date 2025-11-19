@@ -24,7 +24,7 @@ export async function readFiles(
   }
 
   const partitioned = await partitionFileInputs(filePaths, cwd, fsModule);
-  const useNativeFilesystem = fsModule === DEFAULT_FS;
+  const useNativeFilesystem = fsModule === DEFAULT_FS || isNativeFsModule(fsModule);
 
   let candidatePaths: string[] = [];
   if (useNativeFilesystem) {
@@ -338,6 +338,15 @@ function makeDirectoryPattern(relative: string): string {
   return `${stripTrailingSlashes(relative)}/**/*`;
 }
 
+function isNativeFsModule(fsModule: MinimalFsModule): boolean {
+  return (
+    ((fsModule as unknown as Record<string, unknown>).__nativeFs === true ||
+    (fsModule.readFile === DEFAULT_FS.readFile &&
+      fsModule.stat === DEFAULT_FS.stat &&
+      fsModule.readdir === DEFAULT_FS.readdir))
+  );
+}
+
 function normalizeGlob(pattern: string, cwd: string): string {
   if (!pattern) {
     return '';
@@ -392,7 +401,7 @@ function relativePath(targetPath: string, cwd: string): string {
 
 export function createFileSections(files: FileContent[], cwd = process.cwd()): FileSection[] {
   return files.map((file, index) => {
-    const relative = path.relative(cwd, file.path) || file.path;
+    const relative = toPosix(path.relative(cwd, file.path) || file.path);
     const sectionText = [
       `### File ${index + 1}: ${relative}`,
       '```',

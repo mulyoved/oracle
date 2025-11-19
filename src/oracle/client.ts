@@ -1,19 +1,50 @@
-import OpenAI from 'openai';
+import OpenAI, { AzureOpenAI } from 'openai';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import type { ClientLike, OracleRequestBody, OracleResponse, ResponseStreamLike } from './types.js';
+import type {
+  AzureOptions,
+  ClientFactory,
+  ClientLike,
+  OracleRequestBody,
+  OracleResponse,
+  ResponseStreamLike,
+  ModelName,
+} from './types.js';
+import { createGeminiClient } from './gemini.js';
 
 const CUSTOM_CLIENT_FACTORY = loadCustomClientFactory();
 
-export function createDefaultClientFactory(): (apiKey: string) => ClientLike {
+export function createDefaultClientFactory(): ClientFactory {
   if (CUSTOM_CLIENT_FACTORY) {
     return CUSTOM_CLIENT_FACTORY;
   }
-  return (key: string): ClientLike => {
-    const instance = new OpenAI({
-      apiKey: key,
-      timeout: 20 * 60 * 1000,
-    });
+  return (
+    key: string,
+    options?: { baseUrl?: string; azure?: AzureOptions; model?: ModelName; resolvedModelId?: string },
+  ): ClientLike => {
+    if (options?.model?.startsWith('gemini')) {
+    // Gemini client uses its own SDK; allow passing the already-resolved id for transparency/logging.
+    return createGeminiClient(key, options.model, options.resolvedModelId);
+    }
+
+    let instance: OpenAI;
+
+    if (options?.azure?.endpoint) {
+      instance = new AzureOpenAI({
+        apiKey: key,
+        endpoint: options.azure.endpoint,
+        apiVersion: options.azure.apiVersion,
+        deployment: options.azure.deployment,
+        timeout: 20 * 60 * 1000,
+      });
+    } else {
+      instance = new OpenAI({
+        apiKey: key,
+        timeout: 20 * 60 * 1000,
+        baseURL: options?.baseUrl,
+      });
+    }
+
     return {
       responses: {
         stream: (body: OracleRequestBody) =>
@@ -26,7 +57,7 @@ export function createDefaultClientFactory(): (apiKey: string) => ClientLike {
   };
 }
 
-function loadCustomClientFactory(): ((apiKey: string) => ClientLike) | null {
+function loadCustomClientFactory(): ClientFactory | null {
   const override = process.env.ORACLE_CLIENT_FACTORY;
   if (!override) {
     return null;
@@ -44,7 +75,7 @@ function loadCustomClientFactory(): ((apiKey: string) => ClientLike) | null {
             ? moduleExports.createClientFactory
             : null;
     if (typeof factory === 'function') {
-      return factory as (apiKey: string) => ClientLike;
+      return factory as ClientFactory;
     }
     console.warn(`Custom client factory at ${resolved} did not export a function.`);
   } catch (error) {

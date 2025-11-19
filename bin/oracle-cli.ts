@@ -2,6 +2,7 @@
 import 'dotenv/config';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { once } from 'node:events';
 import { Command, Option } from 'commander';
 import type { OptionValues } from 'commander';
 import { resolveEngine, type EngineMode, defaultWaitPreference } from '../src/cli/engine.js';
@@ -27,15 +28,19 @@ import {
   usesDefaultStatusFilters,
   resolvePreviewMode,
   normalizeModelOption,
+  normalizeBaseUrl,
   resolveApiModel,
   inferModelFromLabel,
   parseHeartbeatOption,
+  parseTimeoutOption,
 } from '../src/cli/options.js';
+import { shouldDetachSession } from '../src/cli/detach.js';
 import { applyHiddenAliases } from '../src/cli/hiddenAliases.js';
 import { buildBrowserConfig, resolveBrowserModelLabel } from '../src/cli/browserConfig.js';
 import { performSessionRun } from '../src/cli/sessionRunner.js';
 import { attachSession, showStatus, formatCompletionSummary } from '../src/cli/sessionDisplay.js';
 import type { ShowStatusOptions } from '../src/cli/sessionDisplay.js';
+import { resolveGeminiModelId } from '../src/oracle/gemini.js';
 import { handleSessionCommand, type StatusOptions, formatSessionCleanupMessage } from '../src/cli/sessionCommand.js';
 import { isErrorLogged } from '../src/cli/errorUtils.js';
 import { handleSessionAlias, handleStatusFlag } from '../src/cli/rootAlias.js';
@@ -73,12 +78,16 @@ interface CliOptions extends OptionValues {
   sessionId?: string;
   engine?: EngineMode;
   browser?: boolean;
+  timeout?: number | 'auto';
   browserChromeProfile?: string;
   browserChromePath?: string;
   browserUrl?: string;
   browserTimeout?: string;
   browserInputTimeout?: string;
   browserNoCookieSync?: boolean;
+  browserInlineCookiesFile?: string;
+  browserCookieNames?: string;
+  browserInlineCookies?: string;
   browserHeadless?: boolean;
   browserHideWindow?: boolean;
   browserKeepBrowser?: boolean;
@@ -93,6 +102,11 @@ interface CliOptions extends OptionValues {
   dryRun?: boolean;
   wait?: boolean;
   noWait?: boolean;
+  baseUrl?: string;
+  azureEndpoint?: string;
+  azureDeployment?: string;
+  azureApiVersion?: string;
+  showModelId?: boolean;
 }
 
 type ResolvedCliOptions = Omit<CliOptions, 'model'> & { model: ModelName };
@@ -172,11 +186,28 @@ program
   .addOption(
     new Option('--[no-]notify-sound', 'Play a notification sound on completion (default off).').default(undefined),
   )
-  .option('--dry-run', 'Validate inputs and show token estimates without calling the model.', false)
   .addOption(
-    new Option('--preview [mode]', 'Preview the request without calling the API (summary | json | full).')
+    new Option(
+      '--timeout <seconds|auto>',
+      'Overall timeout before aborting the API call (auto = 20m for gpt-5-pro, 30s otherwise).',
+    )
+      .argParser(parseTimeoutOption)
+      .default('auto'),
+  )
+  .addOption(
+    new Option(
+      '--preview [mode]',
+      '(alias) Preview the request without calling the model (summary | json | full). Deprecated: use --dry-run instead.',
+    )
+      .hideHelp()
       .choices(['summary', 'json', 'full'])
       .preset('summary'),
+  )
+  .addOption(
+    new Option('--dry-run [mode]', 'Preview without calling the model (summary | json | full).')
+      .choices(['summary', 'json', 'full'])
+      .preset('summary')
+      .default(false),
   )
   .addOption(new Option('--exec-session <id>').hideHelp())
   .addOption(new Option('--session <id>').hideHelp())
@@ -198,6 +229,13 @@ program
       .argParser(parseIntOption)
       .hideHelp(),
   )
+  .option(
+    '--base-url <url>',
+    'Override the OpenAI-compatible base URL for API runs (e.g. LiteLLM proxy endpoint).',
+  )
+  .option('--azure-endpoint <url>', 'Azure OpenAI Endpoint (e.g. https://resource.openai.azure.com/).')
+  .option('--azure-deployment <name>', 'Azure OpenAI Deployment Name.')
+  .option('--azure-api-version <version>', 'Azure OpenAI API Version.')
   .addOption(new Option('--browser', '(deprecated) Use --engine browser instead.').default(false).hideHelp())
   .addOption(new Option('--browser-chrome-profile <name>', 'Chrome profile name/path for cookie reuse.').hideHelp())
   .addOption(new Option('--browser-chrome-path <path>', 'Explicit Chrome or Chromium executable path.').hideHelp())
@@ -205,6 +243,13 @@ program
   .addOption(new Option('--browser-timeout <ms|s|m>', 'Maximum time to wait for an answer (default 900s).').hideHelp())
   .addOption(
     new Option('--browser-input-timeout <ms|s|m>', 'Maximum time to wait for the prompt textarea (default 30s).').hideHelp(),
+  )
+  .addOption(new Option('--browser-cookie-names <names>', 'Comma-separated cookie allowlist for sync.').hideHelp())
+  .addOption(
+    new Option('--browser-inline-cookies <jsonOrBase64>', 'Inline cookies payload (JSON array or base64-encoded JSON).').hideHelp(),
+  )
+  .addOption(
+    new Option('--browser-inline-cookies-file <path>', 'Load inline cookies from file (JSON or base64 JSON).').hideHelp(),
   )
   .addOption(new Option('--browser-no-cookie-sync', 'Skip copying cookies from Chrome.').hideHelp())
   .addOption(new Option('--browser-headless', 'Launch Chrome in headless mode.').hideHelp())
@@ -308,20 +353,34 @@ function buildRunOptions(options: ResolvedCliOptions, overrides: Partial<RunOrac
   if (!options.prompt) {
     throw new Error('Prompt is required.');
   }
+  const normalizedBaseUrl = normalizeBaseUrl(overrides.baseUrl ?? options.baseUrl);
+  const azure =
+    options.azureEndpoint || overrides.azure?.endpoint
+      ? {
+          endpoint: overrides.azure?.endpoint ?? options.azureEndpoint,
+          deployment: overrides.azure?.deployment ?? options.azureDeployment,
+          apiVersion: overrides.azure?.apiVersion ?? options.azureApiVersion,
+        }
+      : undefined;
+
   return {
     prompt: options.prompt,
     model: options.model,
+    effectiveModelId: overrides.effectiveModelId ?? options.effectiveModelId ?? options.model,
     file: overrides.file ?? options.file ?? [],
     slug: overrides.slug ?? options.slug,
     filesReport: overrides.filesReport ?? options.filesReport,
     maxInput: overrides.maxInput ?? options.maxInput,
     maxOutput: overrides.maxOutput ?? options.maxOutput,
     system: overrides.system ?? options.system,
+    timeoutSeconds: overrides.timeoutSeconds ?? (options.timeout as number | 'auto' | undefined),
     silent: overrides.silent ?? options.silent,
     search: overrides.search ?? options.search,
     preview: overrides.preview ?? undefined,
     previewMode: overrides.previewMode ?? options.previewMode,
     apiKey: overrides.apiKey ?? options.apiKey,
+    baseUrl: normalizedBaseUrl,
+    azure,
     sessionId: overrides.sessionId ?? options.sessionId,
     verbose: overrides.verbose ?? options.verbose,
     heartbeatIntervalMs: overrides.heartbeatIntervalMs ?? resolveHeartbeatIntervalMs(options.heartbeat),
@@ -329,6 +388,17 @@ function buildRunOptions(options: ResolvedCliOptions, overrides: Partial<RunOrac
     browserBundleFiles: overrides.browserBundleFiles ?? options.browserBundleFiles ?? false,
     background: overrides.background ?? undefined,
   };
+}
+
+export function enforceBrowserSearchFlag(
+  runOptions: RunOracleOptions,
+  sessionMode: SessionMode,
+  logFn: (message: string) => void = console.log,
+): void {
+  if (sessionMode === 'browser' && runOptions.search === false) {
+    logFn(chalk.dim('Note: search is not available in browser engine; ignoring search=false.'));
+    runOptions.search = undefined;
+  }
 }
 
 function resolveHeartbeatIntervalMs(seconds: number | undefined): number | undefined {
@@ -343,6 +413,7 @@ function buildRunOptionsFromMetadata(metadata: SessionMetadata): RunOracleOption
   return {
     prompt: stored.prompt ?? '',
     model: (stored.model as ModelName) ?? 'gpt-5-pro',
+    effectiveModelId: stored.effectiveModelId ?? stored.model,
     file: stored.file ?? [],
     slug: stored.slug,
     filesReport: stored.filesReport,
@@ -350,10 +421,12 @@ function buildRunOptionsFromMetadata(metadata: SessionMetadata): RunOracleOption
     maxOutput: stored.maxOutput,
     system: stored.system,
     silent: stored.silent,
-    search: undefined,
+    search: stored.search,
     preview: false,
     previewMode: undefined,
     apiKey: undefined,
+    baseUrl: normalizeBaseUrl(stored.baseUrl),
+    azure: stored.azure,
     sessionId: metadata.id,
     verbose: stored.verbose,
     heartbeatIntervalMs: stored.heartbeatIntervalMs,
@@ -372,8 +445,18 @@ function getBrowserConfigFromMetadata(metadata: SessionMetadata): BrowserSession
 }
 
 async function runRootCommand(options: CliOptions): Promise<void> {
+  if (process.env.ORACLE_FORCE_TUI === '1') {
+    await ensureSessionStorage();
+    await launchTui({ version: VERSION });
+    return;
+  }
   const userConfig = (await loadUserConfig()).config;
   const helpRequested = rawCliArgs.some((arg: string) => arg === '--help' || arg === '-h');
+  const optionUsesDefault = (name: string): boolean => {
+    // Commander reports undefined for untouched options, so treat undefined/default the same
+    const source = program.getOptionValueSource?.(name);
+    return source == null || source === 'default';
+  };
   if (helpRequested) {
     if (options.verbose) {
       console.log('');
@@ -383,7 +466,7 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     program.help({ error: false });
     return;
   }
-  const previewMode = resolvePreviewMode(options.preview);
+  const previewMode = resolvePreviewMode(options.dryRun || options.preview);
 
   if (userCliArgs.length === 0) {
     if (tuiEnabled()) {
@@ -399,33 +482,69 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     printDebugHelp(program.name());
     return;
   }
-  if (options.dryRun && previewMode) {
-    throw new Error('--dry-run cannot be combined with --preview.');
-  }
   if (options.dryRun && options.renderMarkdown) {
     throw new Error('--dry-run cannot be combined with --render-markdown.');
   }
 
   const preferredEngine = options.engine ?? userConfig.engine;
-  const engine: EngineMode = resolveEngine({ engine: preferredEngine, browserFlag: options.browser, env: process.env });
+  let engine: EngineMode = resolveEngine({ engine: preferredEngine, browserFlag: options.browser, env: process.env });
   if (options.browser) {
     console.log(chalk.yellow('`--browser` is deprecated; use `--engine browser` instead.'));
   }
-  if (program.getOptionValueSource?.('model') === 'default' && userConfig.model) {
+  if (optionUsesDefault('model') && userConfig.model) {
     options.model = userConfig.model;
   }
-  if (program.getOptionValueSource?.('search') === 'default' && userConfig.search) {
+  if (optionUsesDefault('search') && userConfig.search) {
     options.search = userConfig.search === 'on';
   }
-  if (program.getOptionValueSource?.('filesReport') === 'default' && userConfig.filesReport != null) {
+  if (optionUsesDefault('filesReport') && userConfig.filesReport != null) {
     options.filesReport = Boolean(userConfig.filesReport);
   }
-  if (program.getOptionValueSource?.('heartbeat') === 'default' && typeof userConfig.heartbeatSeconds === 'number') {
+  if (optionUsesDefault('heartbeat') && typeof userConfig.heartbeatSeconds === 'number') {
     options.heartbeat = userConfig.heartbeatSeconds;
   }
+  if (optionUsesDefault('baseUrl') && userConfig.apiBaseUrl) {
+    options.baseUrl = userConfig.apiBaseUrl;
+  }
+
+  if (optionUsesDefault('azureEndpoint')) {
+    if (process.env.AZURE_OPENAI_ENDPOINT) {
+      options.azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
+    } else if (userConfig.azure?.endpoint) {
+      options.azureEndpoint = userConfig.azure.endpoint;
+    }
+  }
+  if (optionUsesDefault('azureDeployment')) {
+    if (process.env.AZURE_OPENAI_DEPLOYMENT) {
+      options.azureDeployment = process.env.AZURE_OPENAI_DEPLOYMENT;
+    } else if (userConfig.azure?.deployment) {
+      options.azureDeployment = userConfig.azure.deployment;
+    }
+  }
+  if (optionUsesDefault('azureApiVersion')) {
+    if (process.env.AZURE_OPENAI_API_VERSION) {
+      options.azureApiVersion = process.env.AZURE_OPENAI_API_VERSION;
+    } else if (userConfig.azure?.apiVersion) {
+      options.azureApiVersion = userConfig.azure.apiVersion;
+    }
+  }
+
   const cliModelArg = normalizeModelOption(options.model) || 'gpt-5-pro';
-  const resolvedModel: ModelName = engine === 'browser' ? inferModelFromLabel(cliModelArg) : resolveApiModel(cliModelArg);
+  const resolvedModelCandidate: ModelName =
+    engine === 'browser' ? inferModelFromLabel(cliModelArg) : resolveApiModel(cliModelArg);
+  const isGemini = resolvedModelCandidate.startsWith('gemini');
+  const userForcedBrowser = options.browser || options.engine === 'browser';
+  if (isGemini && userForcedBrowser) {
+    throw new Error('Gemini is only supported via API. Use --engine api.');
+  }
+  if (isGemini && engine === 'browser') {
+    engine = 'api';
+  }
+  const resolvedModel: ModelName = isGemini ? resolveApiModel(cliModelArg) : resolvedModelCandidate;
+  const effectiveModelId = resolvedModel.startsWith('gemini') ? resolveGeminiModelId(resolvedModel) : resolvedModel;
+  const resolvedBaseUrl = normalizeBaseUrl(options.baseUrl ?? process.env.OPENAI_BASE_URL);
   const resolvedOptions: ResolvedCliOptions = { ...options, model: resolvedModel };
+  resolvedOptions.baseUrl = resolvedBaseUrl;
 
   // Decide whether to block until completion:
   // - explicit --wait / --no-wait wins
@@ -464,13 +583,13 @@ async function runRootCommand(options: CliOptions): Promise<void> {
 
   if (previewMode) {
     if (!options.prompt) {
-      throw new Error('Prompt is required when using --preview.');
+      throw new Error('Prompt is required when using --dry-run/preview.');
     }
     if (userConfig.promptSuffix) {
       options.prompt = `${options.prompt.trim()}\n${userConfig.promptSuffix}`;
     }
     resolvedOptions.prompt = options.prompt;
-    const runOptions = buildRunOptions(resolvedOptions, { preview: true, previewMode });
+    const runOptions = buildRunOptions(resolvedOptions, { preview: true, previewMode, baseUrl: resolvedBaseUrl });
     if (engine === 'browser') {
       await runBrowserPreview(
         {
@@ -484,7 +603,30 @@ async function runRootCommand(options: CliOptions): Promise<void> {
       );
       return;
     }
-    await runOracle(runOptions, { log: console.log, write: (chunk: string) => process.stdout.write(chunk) });
+    // API dry-run/preview path
+    if (previewMode === 'summary') {
+      await runDryRunSummary(
+        {
+          engine,
+          runOptions,
+          cwd: process.cwd(),
+          version: VERSION,
+          log: console.log,
+        },
+        {},
+      );
+      return;
+    }
+    await runDryRunSummary(
+      {
+        engine,
+        runOptions,
+        cwd: process.cwd(),
+        version: VERSION,
+        log: console.log,
+      },
+      {},
+    );
     return;
   }
 
@@ -496,21 +638,6 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     options.prompt = `${options.prompt.trim()}\n${userConfig.promptSuffix}`;
   }
   resolvedOptions.prompt = options.prompt;
-
-  if (options.dryRun) {
-    const baseRunOptions = buildRunOptions(resolvedOptions, { preview: false, previewMode: undefined });
-    await runDryRunSummary(
-      {
-        engine,
-        runOptions: baseRunOptions,
-        cwd: process.cwd(),
-        version: VERSION,
-        log: console.log,
-      },
-      {},
-    );
-    return;
-  }
 
   if (options.file && options.file.length > 0) {
     await readFiles(options.file, { cwd: process.cwd() });
@@ -530,19 +657,45 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     sessionMode === 'browser' ? resolveBrowserModelLabel(cliModelArg, resolvedModel) : undefined;
   const browserConfig =
     sessionMode === 'browser'
-      ? buildBrowserConfig({
+      ? await buildBrowserConfig({
           ...options,
           model: resolvedModel,
           browserModelLabel: browserModelLabelOverride,
         })
       : undefined;
 
+  if (options.dryRun) {
+    const baseRunOptions = buildRunOptions(resolvedOptions, {
+      preview: false,
+      previewMode: undefined,
+      baseUrl: resolvedBaseUrl,
+    });
+    await runDryRunSummary(
+      {
+        engine,
+        runOptions: baseRunOptions,
+        cwd: process.cwd(),
+        version: VERSION,
+        log: console.log,
+        browserConfig,
+      },
+      {},
+    );
+    return;
+  }
+
   await ensureSessionStorage();
   const baseRunOptions = buildRunOptions(resolvedOptions, {
     preview: false,
     previewMode: undefined,
     background: userConfig.background ?? resolvedOptions.background,
+    baseUrl: resolvedBaseUrl,
   });
+  enforceBrowserSearchFlag(baseRunOptions, sessionMode, console.log);
+  if (sessionMode === 'browser' && baseRunOptions.search === false) {
+    console.log(chalk.dim('Note: search is not available in browser engine; ignoring search=false.'));
+    baseRunOptions.search = undefined;
+  }
   const sessionMeta = await initializeSession(
     {
       ...baseRunOptions,
@@ -552,12 +705,19 @@ async function runRootCommand(options: CliOptions): Promise<void> {
     process.cwd(),
     notifications,
   );
-  const reattachCommand = `pnpm oracle session ${sessionMeta.id}`;
-  console.log(chalk.bold(`Reattach later with: ${chalk.cyan(reattachCommand)}`));
-  console.log('');
-  const liveRunOptions: RunOracleOptions = { ...baseRunOptions, sessionId: sessionMeta.id };
-  const disableDetach = process.env.ORACLE_NO_DETACH === '1';
-  const detached = disableDetach
+  const liveRunOptions: RunOracleOptions = {
+    ...baseRunOptions,
+    sessionId: sessionMeta.id,
+    effectiveModelId,
+  };
+  const disableDetachEnv = process.env.ORACLE_NO_DETACH === '1';
+  const detachAllowed = shouldDetachSession({
+    engine,
+    model: resolvedModel,
+    waitPreference,
+    disableDetachEnv,
+  });
+  const detached = !detachAllowed
     ? false
     : await launchDetachedSession(sessionMeta.id).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -577,14 +737,21 @@ async function runRootCommand(options: CliOptions): Promise<void> {
   }
 
   if (detached === false) {
-    await runInteractiveSession(sessionMeta, liveRunOptions, sessionMode, browserConfig, true, notifications, userConfig);
-    console.log(chalk.bold(`Session ${sessionMeta.id} completed`));
+    await runInteractiveSession(
+      sessionMeta,
+      liveRunOptions,
+      sessionMode,
+      browserConfig,
+      false,
+      notifications,
+      userConfig,
+      true,
+    );
     return;
   }
   if (detached) {
     console.log(chalk.blue(`Reattach via: oracle session ${sessionMeta.id}`));
     await attachSession(sessionMeta.id, { suppressMetadata: true });
-    console.log(chalk.bold(`Session ${sessionMeta.id} completed`));
   }
 }
 
@@ -596,6 +763,7 @@ async function runInteractiveSession(
   showReattachHint = true,
   notifications?: NotificationSettings,
   userConfig?: UserConfig,
+  suppressSummary = false,
 ): Promise<void> {
   const { logLine, writeChunk, stream } = createSessionLogWriter(sessionMeta.id);
   let headerAugmented = false;
@@ -631,10 +799,12 @@ async function runInteractiveSession(
         notifications ?? deriveNotificationSettingsFromMetadata(sessionMeta, process.env, userConfig?.notify),
     });
     const latest = await readSessionMetadata(sessionMeta.id);
-    const summary = latest ? formatCompletionSummary(latest, { includeSlug: true }) : null;
-    if (summary) {
-      console.log('\n' + chalk.green.bold(summary));
-      logLine(summary); // plain text in log, colored on stdout
+    if (!suppressSummary) {
+      const summary = latest ? formatCompletionSummary(latest, { includeSlug: true }) : null;
+      if (summary) {
+        console.log('\n' + chalk.green.bold(summary));
+        logLine(summary); // plain text in log, colored on stdout
+      }
     }
   } catch (error) {
     throw error;
@@ -779,7 +949,17 @@ program.action(async function (this: Command) {
   await runRootCommand(options);
 });
 
-await program.parseAsync(process.argv).catch((error: unknown) => {
+async function main(): Promise<void> {
+  const parsePromise = program.parseAsync(process.argv);
+  const sigintPromise = once(process, 'SIGINT').then(() => 'sigint' as const);
+  const result = await Promise.race([parsePromise.then(() => 'parsed' as const), sigintPromise]);
+  if (result === 'sigint') {
+    console.log(chalk.yellow('\nCancelled.'));
+    process.exitCode = 130;
+  }
+}
+
+void main().catch((error: unknown) => {
   if (error instanceof Error) {
     if (!isErrorLogged(error)) {
       console.error(chalk.red('✖'), error.message);

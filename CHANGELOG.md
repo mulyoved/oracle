@@ -2,7 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
-## 1.2.0 — unreleased
+## 1.3.0 — Unreleased
+
+### Added
+- Native Azure OpenAI support! Set `AZURE_OPENAI_ENDPOINT` (plus `AZURE_OPENAI_API_KEY` and optionally `AZURE_OPENAI_DEPLOYMENT`/`AZURE_OPENAI_API_VERSION`) or use the new CLI flags (`--azure-endpoint`, `--azure-deployment`, etc.) to switch automatically to the Azure client.
+- **Gemini 3 Pro Support**: Use Google's latest model via `oracle --model gemini`. Requires `GEMINI_API_KEY`.
+- Configurable API timeout: `--timeout <seconds|auto>` (default auto = 20m for gpt-5-pro, 30s for other models). Enforced for streaming and background runs.
+- Help text tip: best results come from 6–30 sentences plus key source files; very short prompts tend to be generic.
+- Browser inline cookies: `--browser-inline-cookies[(-file)]` (or env) accepts JSON/base64 payloads, auto-loads `~/.oracle/cookies.{json,base64}`, and dry-run now reports whether cookies come from Chrome or inline sources.
+- Inline runs now print a single completion line (removed duplicate “Finished” summary), keeping output concise.
+- Gemini runs stay on API (no browser detours), and the CLI logs the resolved model id alongside masked keys when it differs.
+- `--dry-run [summary|json|full]` is now the single preview flag; `--preview` remains as a hidden alias for compatibility.
+- `--show-model-id` prints the resolved id for all models (Gemini/GPT).
+
+## 1.2.0 — 2025-11-18
 
 ### Added
 - `oracle-mcp` stdio server (bin) with `consult` and `sessions` tools plus read-only session resources at `oracle-session://{id}/{metadata|log|request}`.
@@ -25,6 +38,7 @@ All notable changes to this project will be documented in this file.
 - macOS notifier helper now ships signed/notarized with the Oracle icon and auto-repairs execute bits for the fallback terminal-notifier.
 - Session summaries and cost displays are clearer, with zombie-session detection to avoid stale runs.
 - Token estimation now uses the full request body (instructions + input text + tools/reasoning/background/store) and compares estimated vs actual tokens in the finished stats to reduce 400/413 surprises.
+- Help tips now explicitly warn that Oracle cannot see your project unless you pass `--file …` to attach the necessary source.
 
 #### MCP configuration (quick reference)
 - Local stdio (mcporter): add to `config/mcporter.json`

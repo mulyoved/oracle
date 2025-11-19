@@ -14,6 +14,7 @@ import type {
   RunOracleDeps,
   RunOracleOptions,
   RunOracleResult,
+  ModelName,
 } from './types.js';
 import { DEFAULT_SYSTEM_PROMPT, MODEL_CONFIGS, TOKENIZER_OPTIONS } from './config.js';
 import { readFiles } from './files.js';
@@ -29,16 +30,21 @@ import {
   toTransportError,
 } from './errors.js';
 import { createDefaultClientFactory } from './client.js';
+import { formatBaseUrlForLog, maskApiKey } from './logging.js';
 import { startHeartbeat } from '../heartbeat.js';
 import { startOscProgress } from './oscProgress.js';
 import { getCliVersion } from '../version.js';
 import { createFsAdapter } from './fsAdapter.js';
-const isTty = process.stdout.isTTY;
+import { resolveGeminiModelId } from './gemini.js';
+
+const isTty = process.stdout.isTTY && chalk.level > 0;
 const dim = (text: string): string => (isTty ? kleur.dim(text) : text);
 const BACKGROUND_MAX_WAIT_MS = 30 * 60 * 1000;
 const BACKGROUND_POLL_INTERVAL_MS = 5000;
 const BACKGROUND_RETRY_BASE_MS = 3000;
 const BACKGROUND_RETRY_MAX_MS = 15000;
+const DEFAULT_TIMEOUT_NON_PRO_MS = 30_000;
+const DEFAULT_TIMEOUT_PRO_MS = 20 * 60 * 1000;
 
 const defaultWait = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -47,7 +53,7 @@ const defaultWait = (ms: number): Promise<void> =>
 
 export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps = {}): Promise<RunOracleResult> {
   const {
-    apiKey = options.apiKey ?? process.env.OPENAI_API_KEY,
+    apiKey: optionsApiKey = options.apiKey,
     cwd = process.cwd(),
     fs: fsModule = createFsAdapter(fs),
     log = console.log,
@@ -57,14 +63,7 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
     client,
     wait = defaultWait,
   } = deps;
-
-  const maskApiKey = (key: string | undefined | null): string | null => {
-    if (!key) return null;
-    if (key.length <= 8) return `${key[0] ?? ''}***${key[key.length - 1] ?? ''}`;
-    const prefix = key.slice(0, 4);
-    const suffix = key.slice(-4);
-    return `${prefix}****${suffix}`;
-  };
+  const baseUrl = options.baseUrl?.trim() || process.env.OPENAI_BASE_URL?.trim();
 
   const logVerbose = (message: string): void => {
     if (options.verbose) {
@@ -75,15 +74,22 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   const previewMode = resolvePreviewMode(options.previewMode ?? options.preview);
   const isPreview = Boolean(previewMode);
 
-  if (!apiKey) {
-    throw new PromptValidationError('Missing OPENAI_API_KEY. Set it via the environment or a .env file.', {
-      env: 'OPENAI_API_KEY',
-    });
-  }
+  const getApiKeyForModel = (model: ModelName): string | undefined => {
+    if (model.startsWith('gpt')) {
+      return optionsApiKey ?? process.env.OPENAI_API_KEY;
+    }
+    if (model.startsWith('gemini')) {
+      return optionsApiKey ?? process.env.GEMINI_API_KEY;
+    }
+    return undefined;
+  };
 
-  const maskedKey = maskApiKey(apiKey);
-  if (maskedKey) {
-    log(dim(`Using OPENAI_API_KEY=${maskedKey}`));
+  const envVar = options.model.startsWith('gpt') ? 'OPENAI_API_KEY' : 'GEMINI_API_KEY';
+  const apiKey = getApiKeyForModel(options.model);
+  if (!apiKey) {
+    throw new PromptValidationError(`Missing ${envVar}. Set it via the environment or a .env file.`, {
+      env: envVar,
+    });
   }
 
   const modelConfig = MODEL_CONFIGS[options.model];
@@ -99,6 +105,8 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   const files = await readFiles(options.file ?? [], { cwd, fsModule });
   const searchEnabled = options.search !== false;
   logVerbose(`cwd: ${cwd}`);
+  let pendingNoFilesTip: string | null = null;
+  let pendingShortPromptTip: string | null = null;
   if (files.length > 0) {
     const displayPaths = files
       .map((file) => path.relative(cwd, file.path) || file.path)
@@ -109,8 +117,14 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   } else {
     logVerbose('No files attached.');
     if (!isPreview) {
-      log(dim('Tip: no files attached — Oracle works best with project context. Add files via --file path/to/code or docs.'));
+      pendingNoFilesTip =
+        'Tip: no files attached — Oracle works best with project context. Add files via --file path/to/code or docs.';
     }
+  }
+  const shortPrompt = (options.prompt?.trim().length ?? 0) < 80;
+  if (!isPreview && shortPrompt) {
+    pendingShortPromptTip =
+      'Tip: brief prompts often yield generic answers — aim for 6–30 sentences and attach key files.';
   }
   const fileTokenInfo = getFileTokenStats(files, {
     cwd,
@@ -126,6 +140,17 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   const fileCount = files.length;
   const cliVersion = getCliVersion();
   const richTty = process.stdout.isTTY && chalk.level > 0;
+  const timeoutSeconds =
+    options.timeoutSeconds === undefined || options.timeoutSeconds === 'auto'
+      ? options.model === 'gpt-5-pro'
+        ? DEFAULT_TIMEOUT_PRO_MS / 1000
+        : DEFAULT_TIMEOUT_NON_PRO_MS / 1000
+      : options.timeoutSeconds;
+  const timeoutMs = timeoutSeconds * 1000;
+  // Track the concrete model id we dispatch to (especially for Gemini preview aliases)
+  const effectiveModelId =
+    options.effectiveModelId ??
+    (options.model.startsWith('gemini') ? resolveGeminiModelId(options.model) : modelConfig.model);
   const headerModelLabel = richTty ? chalk.cyan(modelConfig.model) : modelConfig.model;
   const requestBody = buildRequestBody({
     modelConfig,
@@ -139,11 +164,27 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   const estimatedInputTokens = estimateRequestTokens(requestBody, modelConfig);
   const tokenLabel = richTty ? chalk.green(estimatedInputTokens.toLocaleString()) : estimatedInputTokens.toLocaleString();
   const fileLabel = richTty ? chalk.magenta(fileCount.toString()) : fileCount.toString();
-  const headerLine = `oracle (${cliVersion}) consulting ${headerModelLabel}'s crystal ball with ${tokenLabel} tokens and ${fileLabel} files...`;
+  const filesPhrase = fileCount === 0 ? 'no files' : `${fileLabel} files`;
+  const headerLine = `🧿 oracle (${cliVersion}) summons ${headerModelLabel} — ${tokenLabel} tokens, ${filesPhrase}`;
   const shouldReportFiles =
     (options.filesReport || fileTokenInfo.totalTokens > inputTokenBudget) && fileTokenInfo.stats.length > 0;
   if (!isPreview) {
     log(headerLine);
+    const maskedKey = maskApiKey(apiKey);
+    if (maskedKey) {
+      const resolvedSuffix =
+        options.model.startsWith('gemini') && effectiveModelId !== modelConfig.model ? ` (resolved: ${effectiveModelId})` : '';
+      log(dim(`Using ${envVar}=${maskedKey} for model ${modelConfig.model}${resolvedSuffix}`));
+    }
+    if (baseUrl) {
+      log(dim(`Base URL: ${formatBaseUrlForLog(baseUrl)}`));
+    }
+    if (pendingNoFilesTip) {
+      log(dim(pendingNoFilesTip));
+    }
+    if (pendingShortPromptTip) {
+      log(dim(pendingShortPromptTip));
+    }
     if (options.model === 'gpt-5-pro') {
       log(dim('Pro is thinking, this can take up to 30 minutes...'));
     }
@@ -184,11 +225,23 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
     };
   }
 
-  const openAiClient: ClientLike = client ?? clientFactory(apiKey);
-  logVerbose('Dispatching request to OpenAI Responses API...');
+  const apiEndpoint = modelConfig.model.startsWith('gemini') ? undefined : baseUrl;
+  const clientInstance: ClientLike =
+    client ??
+    clientFactory(apiKey, {
+      baseUrl: apiEndpoint,
+      azure: options.azure,
+      model: options.model,
+      resolvedModelId: effectiveModelId,
+    });
+  logVerbose('Dispatching request to API...');
+  if (options.verbose) {
+    log(''); // ensure verbose section is separated from Answer stream
+  }
   const stopOscProgress = startOscProgress({
-    label: useBackground ? 'Waiting for OpenAI (background)' : 'Waiting for OpenAI',
-    targetMs: useBackground ? BACKGROUND_MAX_WAIT_MS : 10 * 60_000,
+    label: useBackground ? 'Waiting for API (background)' : 'Waiting for API',
+    targetMs: useBackground ? timeoutMs : Math.min(timeoutMs, 10 * 60_000),
+    indeterminate: true,
     write,
   });
 
@@ -197,6 +250,15 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   let elapsedMs = 0;
   let sawTextDelta = false;
   let answerHeaderPrinted = false;
+  const timeoutExceeded = (): boolean => now() - runStart >= timeoutMs;
+  const throwIfTimedOut = () => {
+    if (timeoutExceeded()) {
+      throw new OracleTransportError(
+        'client-timeout',
+        `Timed out waiting for API response after ${formatElapsed(timeoutMs)}.`,
+      );
+    }
+  };
   const ensureAnswerHeader = () => {
     if (!options.silent && !answerHeaderPrinted) {
       log('');
@@ -208,16 +270,17 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   try {
     if (useBackground) {
       response = await executeBackgroundResponse({
-        client: openAiClient,
+        client: clientInstance,
         requestBody,
         log,
         wait,
         heartbeatIntervalMs: options.heartbeatIntervalMs,
         now,
+        maxWaitMs: timeoutMs,
       });
       elapsedMs = now() - runStart;
     } else {
-      const stream: ResponseStreamLike = await openAiClient.responses.stream(requestBody);
+      const stream: ResponseStreamLike = await clientInstance.responses.stream(requestBody);
       let heartbeatActive = false;
       let stopHeartbeat: (() => void) | null = null;
       const stopHeartbeatNow = () => {
@@ -228,21 +291,25 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
         stopHeartbeat?.();
         stopHeartbeat = null;
       };
-      if (options.heartbeatIntervalMs && options.heartbeatIntervalMs > 0) {
-        heartbeatActive = true;
-        stopHeartbeat = startHeartbeat({
-          intervalMs: options.heartbeatIntervalMs,
-          log: (message) => log(message),
-          isActive: () => heartbeatActive,
-          makeMessage: (elapsedMs) => {
-            const elapsedText = formatElapsed(elapsedMs);
-            return `API connection active — ${elapsedText} elapsed. Expect up to ~10 min before GPT-5 responds.`;
-          },
-        });
-      }
+        if (options.heartbeatIntervalMs && options.heartbeatIntervalMs > 0) {
+          heartbeatActive = true;
+          stopHeartbeat = startHeartbeat({
+            intervalMs: options.heartbeatIntervalMs,
+            log: (message) => log(message),
+            isActive: () => heartbeatActive,
+            makeMessage: (elapsedMs) => {
+              const elapsedText = formatElapsed(elapsedMs);
+              const timeoutLabel = Math.round(timeoutMs / 60000);
+              return `API connection active — ${elapsedText} elapsed. Timeout in ~${timeoutLabel} min if no response.`;
+            },
+          });
+        }
       try {
         for await (const event of stream) {
-          if (event.type === 'response.output_text.delta') {
+          throwIfTimedOut();
+          const isTextDelta =
+            event.type === 'chunk' || event.type === 'response.output_text.delta';
+          if (isTextDelta) {
             stopOscProgress();
             stopHeartbeatNow();
             sawTextDelta = true;
@@ -252,16 +319,16 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
             }
           }
         }
+        throwIfTimedOut();
       } catch (streamError) {
-        if (typeof stream.abort === 'function') {
-          stream.abort();
-        }
+        // stream.abort() is not available on the interface
         stopHeartbeatNow();
         const transportError = toTransportError(streamError);
         log(chalk.yellow(describeTransportError(transportError)));
         throw transportError;
       }
       response = await stream.finalResponse();
+      throwIfTimedOut();
       stopHeartbeatNow();
       elapsedMs = now() - runStart;
     }
@@ -270,13 +337,19 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   }
 
   if (!response) {
-    throw new Error('OpenAI did not return a response.');
+    throw new Error('API did not return a response.');
+  }
+
+  // biome-ignore lint/nursery/noUnnecessaryConditions: we only add spacing when any streamed text was printed
+  if (sawTextDelta && !options.silent) {
+    write('\n');
+    log('');
   }
 
   logVerbose(`Response status: ${response.status ?? 'completed'}`);
 
   if (response.status && response.status !== 'completed') {
-    // OpenAI can reply `in_progress` even after the stream closes; give it a brief grace poll.
+    // API can reply `in_progress` even after the stream closes; give it a brief grace poll.
     if (response.id && response.status === 'in_progress') {
       const polishingStart = now();
       const pollIntervalMs = 2_000;
@@ -285,7 +358,7 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
       // Short polling loop — we don't want to hang forever, just catch late finalization.
       while (now() - polishingStart < maxWaitMs) {
         await wait(pollIntervalMs);
-        const refreshed = await openAiClient.responses.retrieve(response.id);
+        const refreshed = await clientInstance.responses.retrieve(response.id);
         if (refreshed.status === 'completed') {
           response = refreshed;
           break;
@@ -297,9 +370,7 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
       const detail = response.error?.message || response.incomplete_details?.reason || response.status;
       log(
         chalk.yellow(
-          `OpenAI ended the run early (status=${response.status}${
-            response.incomplete_details?.reason ? `, reason=${response.incomplete_details.reason}` : ''
-          }).`,
+          `API ended the run early (status=${response.status}${response.incomplete_details?.reason ? `, reason=${response.incomplete_details.reason}` : ''}).`,
         ),
       );
       throw new OracleResponseError(`Response did not complete: ${detail}`, response);
@@ -310,7 +381,7 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   if (!options.silent) {
     // biome-ignore lint/nursery/noUnnecessaryConditions: flips true when streaming events arrive
     if (sawTextDelta) {
-      write('\n\n');
+      write('\n');
     } else {
       ensureAnswerHeader();
       log(answerText || chalk.dim('(no text output)'));
@@ -333,7 +404,8 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
   const tokensDisplay = [inputTokens, outputTokens, reasoningTokens, totalTokens]
     .map((value, index) => formatTokenValue(value, usage, index))
     .join('/');
-  statsParts.push(`tok(i/o/r/t)=${tokensDisplay}`);
+  const tokensLabel = options.verbose ? 'tokens (input/output/reasoning/total)' : 'tok(i/o/r/t)';
+  statsParts.push(`${tokensLabel}=${tokensDisplay}`);
   const actualInput = usage.input_tokens;
   if (actualInput !== undefined) {
     const delta = actualInput - estimatedInputTokens;
@@ -349,7 +421,8 @@ export async function runOracle(options: RunOracleOptions, deps: RunOracleDeps =
     statsParts.push(`files=${files.length}`);
   }
 
-  log(chalk.blue(`Finished in ${elapsedDisplay} (${statsParts.join(' | ')})`));
+  const sessionPrefix = options.sessionId ? `${options.sessionId} ` : '';
+  log(chalk.blue(`Finished ${sessionPrefix}in ${elapsedDisplay} (${statsParts.join(' | ')})`));
 
   return {
     mode: 'live',
@@ -413,18 +486,19 @@ interface BackgroundExecutionParams {
   wait: (ms: number) => Promise<void>;
   heartbeatIntervalMs?: number;
   now: () => number;
+  maxWaitMs: number;
 }
 
 async function executeBackgroundResponse(params: BackgroundExecutionParams): Promise<OracleResponse> {
-  const { client, requestBody, log, wait, heartbeatIntervalMs, now } = params;
+  const { client, requestBody, log, wait, heartbeatIntervalMs, now, maxWaitMs } = params;
   const initialResponse = await client.responses.create(requestBody);
   if (!initialResponse || !initialResponse.id) {
-    throw new OracleResponseError('OpenAI did not return a response ID for the background run.', initialResponse);
+    throw new OracleResponseError('API did not return a response ID for the background run.', initialResponse);
   }
   const responseId = initialResponse.id;
   log(
     dim(
-      `OpenAI scheduled background response ${responseId} (status=${initialResponse.status ?? 'unknown'}). Monitoring up to ${Math.round(
+      `API scheduled background response ${responseId} (status=${initialResponse.status ?? 'unknown'}). Monitoring up to ${Math.round(
         BACKGROUND_MAX_WAIT_MS / 60000,
       )} minutes for completion...`,
     ),
@@ -447,7 +521,7 @@ async function executeBackgroundResponse(params: BackgroundExecutionParams): Pro
       isActive: () => heartbeatActive,
       makeMessage: (elapsedMs) => {
         const elapsedText = formatElapsed(elapsedMs);
-        return `OpenAI background run still in progress — ${elapsedText} elapsed.`;
+        return `API background run still in progress — ${elapsedText} elapsed.`;
       },
     });
   }
@@ -459,7 +533,7 @@ async function executeBackgroundResponse(params: BackgroundExecutionParams): Pro
       log,
       wait,
       now,
-      maxWaitMs: BACKGROUND_MAX_WAIT_MS,
+      maxWaitMs,
     });
   } finally {
     stopHeartbeatNow();
@@ -488,9 +562,9 @@ async function pollBackgroundResponse(params: BackgroundPollParams): Promise<Ora
     // biome-ignore lint/nursery/noUnnecessaryConditions: guard only for first iteration
     if (firstCycle) {
       firstCycle = false;
-      log(dim(`OpenAI background response status=${status}. We'll keep retrying automatically.`));
+      log(dim(`API background response status=${status}. We'll keep retrying automatically.`));
     } else if (status !== lastStatus && status !== 'completed') {
-      log(dim(`OpenAI background response status=${status}.`));
+      log(dim(`API background response status=${status}.`));
     }
     lastStatus = status;
 
@@ -502,12 +576,12 @@ async function pollBackgroundResponse(params: BackgroundPollParams): Promise<Ora
       throw new OracleResponseError(`Response did not complete: ${detail}`, response);
     }
     if (now() - startMark >= maxWaitMs) {
-      throw new OracleTransportError('client-timeout', 'Timed out waiting for OpenAI background response to finish.');
+      throw new OracleTransportError('client-timeout', 'Timed out waiting for API background response to finish.');
     }
 
     await wait(BACKGROUND_POLL_INTERVAL_MS);
     if (now() - startMark >= maxWaitMs) {
-      throw new OracleTransportError('client-timeout', 'Timed out waiting for OpenAI background response to finish.');
+      throw new OracleTransportError('client-timeout', 'Timed out waiting for API background response to finish.');
     }
     const { response: nextResponse, reconnected } = await retrieveBackgroundResponseWithRetry({
       client,
@@ -520,7 +594,7 @@ async function pollBackgroundResponse(params: BackgroundPollParams): Promise<Ora
     });
     if (reconnected) {
       const nextStatus = nextResponse.status ?? 'in_progress';
-      log(dim(`Reconnected to OpenAI background response (status=${nextStatus}). OpenAI is still working...`));
+      log(dim(`Reconnected to API background response (status=${nextStatus}). API is still working...`));
     }
     response = nextResponse;
   }
@@ -556,7 +630,7 @@ async function retrieveBackgroundResponseWithRetry(
       log(chalk.yellow(`${describeTransportError(transportError)} Retrying in ${formatElapsed(delay)}...`));
       await wait(delay);
       if (now() - startMark >= maxWaitMs) {
-        throw new OracleTransportError('client-timeout', 'Timed out waiting for OpenAI background response to finish.');
+        throw new OracleTransportError('client-timeout', 'Timed out waiting for API background response to finish.');
       }
     }
   }
