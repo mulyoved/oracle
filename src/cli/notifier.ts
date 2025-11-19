@@ -62,13 +62,14 @@ export async function sendSessionNotification(
   payload: NotificationContent,
   settings: NotificationSettings,
   log: (message: string) => void,
+  answerPreview?: string,
 ): Promise<void> {
   if (!settings.enabled || isTestEnv(process.env)) {
     return;
   }
 
   const title = `Oracle${ORACLE_EMOJI} finished`;
-  const message = buildMessage(payload);
+  const message = buildMessage(payload, sanitizePreview(answerPreview));
 
   try {
     if (await tryMacNativeNotifier(title, message, settings)) {
@@ -99,15 +100,17 @@ export async function sendSessionNotification(
   }
 }
 
-function buildMessage(payload: NotificationContent): string {
+function buildMessage(payload: NotificationContent, answerPreview?: string): string {
   const parts: string[] = [];
   const sessionLabel = payload.sessionName || payload.sessionId;
-  parts.push(`session ${sessionLabel}`);
+  parts.push(sessionLabel);
 
+  // Show cost only for API runs.
   if (payload.mode === 'api') {
     const cost = payload.costUsd ?? inferCost(payload);
     if (cost !== undefined) {
-      parts.push(formatUSD(cost));
+      // Round to $0.00 for a concise toast.
+      parts.push(formatUSD(Number(cost.toFixed(2))));
     }
   }
 
@@ -115,8 +118,40 @@ function buildMessage(payload: NotificationContent): string {
     parts.push(`${formatNumber(payload.characters)} chars`);
   }
 
+  if (answerPreview) {
+    parts.push(answerPreview);
+  }
+
   return parts.join(' · ');
 }
+
+function sanitizePreview(preview?: string): string | undefined {
+  if (!preview) return undefined;
+  let text = preview;
+  // Strip code fences and inline code markers.
+  text = text.replace(/```[\s\S]*?```/g, ' ');
+  text = text.replace(/`([^`]+)`/g, '$1');
+  // Convert markdown links and images to their visible text.
+  text = text.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1');
+  text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  // Drop bold/italic markers.
+  text = text.replace(/(\*\*|__|\*|_)/g, '');
+  // Remove headings / list markers / blockquotes.
+  text = text.replace(/^\s*#+\s*/gm, '');
+  text = text.replace(/^\s*[-*+]\s+/gm, '');
+  text = text.replace(/^\s*>\s+/gm, '');
+  // Collapse whitespace and trim.
+  text = text.replace(/\s+/g, ' ').trim();
+  // Limit length to keep notifications short.
+  const max = 200;
+  if (text.length > max) {
+    text = `${text.slice(0, max - 1)}…`;
+  }
+  return text;
+}
+
+// Exposed for unit tests only.
+export const testHelpers = { sanitizePreview };
 
 function inferCost(payload: NotificationContent): number | undefined {
   const model = payload.model;

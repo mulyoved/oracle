@@ -40,3 +40,4 @@
   }
   ```
 - Tools and resources operate on the same session store as `oracle status|session`.
+- Background runs (e.g., GPT-5 Pro API) still detach; if a call stalls or times out in your MCP client, reattach to the existing session via `oracle session <id>` instead of starting a new consult.

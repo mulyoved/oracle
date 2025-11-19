@@ -64,6 +64,54 @@ describe('resolveRunOptionsFromConfig', () => {
     expect(runOptions.filesReport).toBe(true);
     expect(runOptions.background).toBe(false);
   });
+
+  it('includes apiBaseUrl from config', () => {
+    const { runOptions } = resolveRunOptionsFromConfig({
+      prompt: basePrompt,
+      userConfig: { apiBaseUrl: 'https://proxy.test/v1' },
+    });
+    expect(runOptions.baseUrl).toBe('https://proxy.test/v1');
+  });
+
+  it('falls back to OPENAI_BASE_URL env', () => {
+    const env = {} as NodeJS.ProcessEnv;
+    env.OPENAI_BASE_URL = 'https://env.example/v2';
+    const { runOptions } = resolveRunOptionsFromConfig({
+      prompt: basePrompt,
+      env,
+    });
+    expect(runOptions.baseUrl).toBe('https://env.example/v2');
+  });
+
+  it('forces api engine for gemini when engine is auto-detected', () => {
+    const { runOptions, resolvedEngine } = resolveRunOptionsFromConfig({
+      prompt: basePrompt,
+      model: 'gemini-3-pro',
+      env: {}, // no OPENAI_API_KEY, would normally choose browser
+    });
+    expect(resolvedEngine).toBe('api');
+    expect(runOptions.model).toBe('gemini-3-pro');
+  });
+
+  it('throws when browser engine is explicitly combined with gemini', () => {
+    expect(() =>
+      resolveRunOptionsFromConfig({
+        prompt: basePrompt,
+        model: 'gemini-3-pro',
+        engine: 'browser',
+      }),
+    ).toThrow('Gemini is only supported via API. Use --engine api.');
+  });
+
+  it('ignores config browser engine and forces api when model is gemini', () => {
+    const { resolvedEngine, runOptions } = resolveRunOptionsFromConfig({
+      prompt: basePrompt,
+      model: 'gemini-3-pro',
+      userConfig: { engine: 'browser' },
+    });
+    expect(resolvedEngine).toBe('api');
+    expect(runOptions.model).toBe('gemini-3-pro');
+  });
 });
 
 describe('estimateRequestTokens', () => {
@@ -84,7 +132,7 @@ describe('estimateRequestTokens', () => {
       background: true,
       store: true,
     };
-    const estimate = estimateRequestTokens(request as any, modelConfig, 10);
+    const estimate = estimateRequestTokens(request as unknown as Parameters<typeof estimateRequestTokens>[0], modelConfig, 10);
     // Rough sanity: base tokenizer on text parts should be > 0; buffer ensures > base.
     expect(estimate).toBeGreaterThan(10);
   });
@@ -95,7 +143,7 @@ describe('estimateRequestTokens', () => {
       instructions: 'a',
       input: [{ role: 'user', content: [{ type: 'input_text', text: 'b' }] }],
     };
-    const estimate = estimateRequestTokens(request as any, modelConfig, 50);
+    const estimate = estimateRequestTokens(request as unknown as Parameters<typeof estimateRequestTokens>[0], modelConfig, 50);
     expect(estimate).toBeGreaterThanOrEqual(50);
   });
 });

@@ -1,6 +1,17 @@
 export type TokenizerFn = (input: unknown, options?: Record<string, unknown>) => number;
 
-export type ModelName = 'gpt-5-pro' | 'gpt-5.1';
+export type ModelName = 'gpt-5-pro' | 'gpt-5.1' | 'gemini-3-pro';
+
+export interface AzureOptions {
+  endpoint?: string;
+  apiVersion?: string;
+  deployment?: string;
+}
+
+export type ClientFactory = (
+  apiKey: string,
+  options?: { baseUrl?: string; azure?: AzureOptions; model?: ModelName; resolvedModelId?: string },
+) => ClientLike;
 
 export interface ModelConfig {
   model: ModelName;
@@ -60,7 +71,6 @@ export interface ResponseStreamEvent {
 
 export interface ResponseStreamLike extends AsyncIterable<ResponseStreamEvent> {
   finalResponse(): Promise<OracleResponse>;
-  abort?: () => void;
 }
 
 export interface ClientLike {
@@ -85,12 +95,17 @@ export interface RunOracleOptions {
   preview?: boolean | string;
   previewMode?: PreviewMode;
   apiKey?: string;
+  baseUrl?: string;
+  azure?: AzureOptions;
   sessionId?: string;
+  effectiveModelId?: string;
   verbose?: boolean;
   heartbeatIntervalMs?: number;
   browserInlineFiles?: boolean;
   browserBundleFiles?: boolean;
   background?: boolean;
+  /** Number of seconds to wait before timing out, or 'auto' to use model defaults. */
+  timeoutSeconds?: number | 'auto';
 }
 
 export interface UsageSummary {
@@ -125,7 +140,7 @@ export interface RunOracleDeps {
   log?: (message: string) => void;
   write?: (chunk: string) => boolean;
   now?: () => number;
-  clientFactory?: (apiKey: string) => ClientLike;
+  clientFactory?: ClientFactory;
   client?: ClientLike;
   wait?: (ms: number) => Promise<void>;
 }

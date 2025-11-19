@@ -85,10 +85,29 @@ export function normalizeModelOption(value: string | undefined): string {
   return (value ?? '').trim();
 }
 
+export function normalizeBaseUrl(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed?.length ? trimmed : undefined;
+}
+
+export function parseTimeoutOption(value: string | undefined): number | 'auto' | undefined {
+  if (value == null) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'auto') return 'auto';
+  const parsed = Number.parseFloat(normalized);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    throw new InvalidArgumentError('Timeout must be a positive number of seconds or "auto".');
+  }
+  return parsed;
+}
+
 export function resolveApiModel(modelValue: string): ModelName {
   const normalized = normalizeModelOption(modelValue).toLowerCase();
   if (normalized in MODEL_CONFIGS) {
     return normalized as ModelName;
+  }
+  if (normalized.includes('gemini')) {
+    return 'gemini-3-pro';
   }
   throw new InvalidArgumentError(
     `Unsupported model "${modelValue}". Choose one of: ${Object.keys(MODEL_CONFIGS).join(', ')}`,
@@ -102,6 +121,9 @@ export function inferModelFromLabel(modelValue: string): ModelName {
   }
   if (normalized in MODEL_CONFIGS) {
     return normalized as ModelName;
+  }
+  if (normalized.includes('gemini')) {
+    return 'gemini-3-pro';
   }
   if (normalized.includes('pro')) {
     return 'gpt-5-pro';

@@ -21,7 +21,9 @@ Oracle gives your agents a simple, reliable way to **bundle a prompt plus the ri
 If you omit `--engine`, Oracle prefers the API engine when `OPENAI_API_KEY` is present; otherwise it falls back to browser mode. Switch explicitly with `-e, --engine {api|browser}` when you want to override the auto choice. Everything else (prompt assembly, file handling, session logging) stays the same.
 
 Note: Browser engine is considered experimental, requires an OpenAI Pro account and only works on macOS with Chrome.
-Your system password is needed to copy cookies. API engine is stable and should be preferred.
+Your system password is needed to copy cookies. To skip Chrome/Keychain entirely, pass inline cookies via
+`--browser-inline-cookies <json|base64>` or `--browser-inline-cookies-file <path>` (fallback files at
+`~/.oracle/cookies.json` or `~/.oracle/cookies.base64`). API engine is stable and should be preferred.
 
 ## Quick start
 
@@ -37,6 +39,15 @@ npx -y @steipete/oracle -p "Review the TS data layer" --file "src/**/*.ts" --fil
 
 # Mixed glob + single file
 npx -y @steipete/oracle -p "Audit data layer" --file "src/**/*.ts" --file README.md
+
+# Dry-run (no API call) with summary estimate
+oracle --dry-run summary -p "Check release notes" --file docs/release-notes.md
+
+# Show the exact model id (useful for Gemini preview aliases)
+oracle --model gemini-3-pro --show-model-id -p "Quick smoke test"
+
+# Alternate base URL (LiteLLM, Azure, self-hosted gateways)
+OPENAI_API_KEY=sk-... oracle --base-url https://litellm.example.com/v1 -p "Summarize the risk register"
 
 # Inspect past sessions
 oracle status --clear --hours 168   # prune a week of cached runs
@@ -86,13 +97,12 @@ Put per-user defaults in `~/.oracle/config.json` (parsed as JSON5, so comments/t
 | `-f, --file <paths...>` | Attach files/dirs (supports globs and `!` excludes). |
 | `-e, --engine <api\|browser>` | Choose API or browser automation. Omitted: API when `OPENAI_API_KEY` is set, otherwise browser. |
 | `-m, --model <name>` | `gpt-5-pro` (default) or `gpt-5.1`. |
+| `--base-url <url>` | Point the API engine at any OpenAI-compatible endpoint (LiteLLM, Azure, etc.). |
+| `--azure-endpoint <url>` | Use Azure OpenAI (switches client automatically). |
 | `--files-report` | Print per-file token usage. |
-| `--preview [summary\|json\|full]` | Inspect the request without sending. |
-| `--render-markdown` | Print the assembled `[SYSTEM]/[USER]/[FILE]` bundle. |
-| `--wait` / `--no-wait` | Block until completion. Default: `wait` for gpt-5.1/browser; `no-wait` for gpt-5-pro API (reattach later). |
-| `-v, --verbose` | Extra logging (also surfaces advanced flags with `--help`). |
+| `--dry-run [summary\|json\|full]` | Inspect the request without sending (alias: `--preview`). |
 
-More knobs (`--max-input`, cookie sync controls for browser mode, etc.) live behind `oracle --help --verbose`.
+See [docs/openai-endpoints.md](docs/openai-endpoints.md) for advanced Azure/LiteLLM configuration.
 
 ## Sessions & background runs
 

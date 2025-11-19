@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from 'vitest';
 import type { RunOracleOptions } from '../../src/oracle.js';
 import type { BrowserSessionConfig } from '../../src/sessionManager.js';
 import { runBrowserSessionExecution } from '../../src/browser/sessionRunner.js';
+import { BrowserAutomationError } from '../../src/oracle/errors.js';
 import { getCliVersion } from '../../src/version.js';
 
 const baseRunOptions: RunOracleOptions = {
@@ -79,6 +80,75 @@ describe('runBrowserSessionExecution', () => {
     expect(log.mock.calls.some((call) => String(call[0]).includes('Browser attachments'))).toBe(true);
   });
 
+  test('verbose output spells out token labels', async () => {
+    const log = vi.fn();
+    await runBrowserSessionExecution(
+      {
+        runOptions: { ...baseRunOptions, verbose: true },
+        browserConfig: baseConfig,
+        cwd: '/repo',
+        log,
+        cliVersion,
+      },
+      {
+        assemblePrompt: async () => ({
+          markdown: 'prompt',
+          composerText: 'prompt',
+          estimatedInputTokens: 10,
+          attachments: [],
+          inlineFileCount: 0,
+          tokenEstimateIncludesInlineFiles: false,
+        }),
+        executeBrowser: async () => ({
+          answerText: 'text',
+          answerMarkdown: 'markdown',
+          tookMs: 100,
+          answerTokens: 5,
+          answerChars: 10,
+        }),
+      },
+    );
+
+    const finishedLine = log.mock.calls.map((c) => String(c[0])).find((line) => line.startsWith('Finished in '));
+    expect(finishedLine).toBeDefined();
+    expect(finishedLine).toContain('tokens (input/output/reasoning/total)=');
+  });
+
+  test('non-verbose output keeps short token label', async () => {
+    const log = vi.fn();
+    await runBrowserSessionExecution(
+      {
+        runOptions: { ...baseRunOptions, verbose: false },
+        browserConfig: baseConfig,
+        cwd: '/repo',
+        log,
+        cliVersion,
+      },
+      {
+        assemblePrompt: async () => ({
+          markdown: 'prompt',
+          composerText: 'prompt',
+          estimatedInputTokens: 10,
+          attachments: [],
+          inlineFileCount: 0,
+          tokenEstimateIncludesInlineFiles: false,
+        }),
+        executeBrowser: async () => ({
+          answerText: 'text',
+          answerMarkdown: 'markdown',
+          tookMs: 100,
+          answerTokens: 5,
+          answerChars: 10,
+        }),
+      },
+    );
+
+    const finishedLine = log.mock.calls.map((c) => String(c[0])).find((line) => line.startsWith('Finished in '));
+    expect(finishedLine).toBeDefined();
+    expect(finishedLine).toContain('tok(i/o/r/t)=');
+    expect(finishedLine).not.toContain('tokens (input/output/reasoning/total)=');
+  });
+
   test('passes heartbeat interval through to browser runner', async () => {
     const log = vi.fn();
     const executeBrowser = vi.fn(async () => ({
@@ -111,5 +181,25 @@ describe('runBrowserSessionExecution', () => {
     expect(executeBrowser).toHaveBeenCalledWith(
       expect.objectContaining({ heartbeatIntervalMs: 15_000 }),
     );
+  });
+
+  test('throws when attempting to use Gemini in browser mode', async () => {
+    const log = vi.fn();
+    await expect(
+      runBrowserSessionExecution(
+        {
+          runOptions: { ...baseRunOptions, model: 'gemini-3-pro' },
+          browserConfig: baseConfig,
+          cwd: '/repo',
+          log,
+          cliVersion,
+        },
+        {
+          assemblePrompt: async () => ({ markdown: 'prompt', composerText: 'prompt', estimatedInputTokens: 1, attachments: [], inlineFileCount: 0, tokenEstimateIncludesInlineFiles: false }),
+          executeBrowser: async () => ({ answerText: 'text', answerMarkdown: 'markdown', tookMs: 1, answerTokens: 1, answerChars: 1 }),
+        },
+      ),
+    ).rejects.toBeInstanceOf(BrowserAutomationError);
+    expect(log).not.toHaveBeenCalled();
   });
 });

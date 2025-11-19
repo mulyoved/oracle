@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'vitest';
-import { buildBrowserConfig, resolveBrowserModelLabel } from '../../src/cli/browserConfig.ts';
+import { buildBrowserConfig, resolveBrowserModelLabel } from '../../src/cli/browserConfig.js';
 
 describe('buildBrowserConfig', () => {
-  test('uses defaults when optional flags omitted', () => {
-    const config = buildBrowserConfig({ model: 'gpt-5-pro' });
+  test('uses defaults when optional flags omitted', async () => {
+    const config = await buildBrowserConfig({ model: 'gpt-5-pro' });
     expect(config).toMatchObject({
       chromeProfile: 'Default',
       chromePath: null,
@@ -20,8 +20,8 @@ describe('buildBrowserConfig', () => {
     });
   });
 
-  test('honors overrides and converts durations + booleans', () => {
-    const config = buildBrowserConfig({
+  test('honors overrides and converts durations + booleans', async () => {
+    const config = await buildBrowserConfig({
       model: 'gpt-5.1',
       browserChromeProfile: 'Profile 2',
       browserChromePath: '/Applications/Chrome.app',
@@ -45,30 +45,37 @@ describe('buildBrowserConfig', () => {
       headless: true,
       hideWindow: true,
       keepBrowser: true,
-      desiredModel: 'ChatGPT 5.1',
+      desiredModel: 'GPT-5.1',
       debug: true,
       allowCookieErrors: true,
     });
   });
 
-  test('prefers explicit browser model label when provided', () => {
-    const config = buildBrowserConfig({
+  test('prefers explicit browser model label when provided', async () => {
+    const config = await buildBrowserConfig({
       model: 'gpt-5-pro',
       browserModelLabel: 'Instant',
     });
     expect(config.desiredModel).toBe('Instant');
   });
 
-  test('falls back to canonical label when override matches base model', () => {
-    const config = buildBrowserConfig({
+  test('falls back to canonical label when override matches base model', async () => {
+    const config = await buildBrowserConfig({
       model: 'gpt-5.1',
       browserModelLabel: 'gpt-5.1',
     });
-    expect(config.desiredModel).toBe('ChatGPT 5.1');
+    expect(config.desiredModel).toBe('GPT-5.1');
   });
 
-  test('trims whitespace around override labels', () => {
-    const config = buildBrowserConfig({
+  test('maps thinking Gemini model to thinking label', async () => {
+    const config = await buildBrowserConfig({
+      model: 'gemini-3-pro',
+    });
+    expect(config.desiredModel).toBe('Gemini 3 Pro');
+  });
+
+  test('trims whitespace around override labels', async () => {
+    const config = await buildBrowserConfig({
       model: 'gpt-5.1',
       browserModelLabel: '  ChatGPT 5.1 Instant  ',
     });
@@ -79,11 +86,11 @@ describe('buildBrowserConfig', () => {
 describe('resolveBrowserModelLabel', () => {
   test('returns canonical ChatGPT label when CLI value matches API model', () => {
     expect(resolveBrowserModelLabel('gpt-5-pro', 'gpt-5-pro')).toBe('GPT-5 Pro');
-    expect(resolveBrowserModelLabel('GPT-5.1', 'gpt-5.1')).toBe('ChatGPT 5.1');
+    expect(resolveBrowserModelLabel('GPT-5.1', 'gpt-5.1')).toBe('GPT-5.1');
   });
 
   test('falls back to canonical label when input is empty', () => {
-    expect(resolveBrowserModelLabel('', 'gpt-5.1')).toBe('ChatGPT 5.1');
+    expect(resolveBrowserModelLabel('', 'gpt-5.1')).toBe('GPT-5.1');
   });
 
   test('preserves descriptive labels to target alternate picker entries', () => {
@@ -92,7 +99,7 @@ describe('resolveBrowserModelLabel', () => {
 
   test('supports undefined or whitespace-only input', () => {
     expect(resolveBrowserModelLabel(undefined, 'gpt-5-pro')).toBe('GPT-5 Pro');
-    expect(resolveBrowserModelLabel('   ', 'gpt-5.1')).toBe('ChatGPT 5.1');
+    expect(resolveBrowserModelLabel('   ', 'gpt-5.1')).toBe('GPT-5.1');
   });
 
   test('trims descriptive labels before returning them', () => {

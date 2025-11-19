@@ -30,6 +30,12 @@ const dim = (text: string): string => (isTty() ? kleur.dim(text) : text);
 
 const RECENT_WINDOW_HOURS = 24;
 const PAGE_SIZE = 10;
+const STATUS_PAD = 9;
+const MODEL_PAD = 13;
+const MODE_PAD = 7;
+const TIMESTAMP_PAD = 19;
+const CHARS_PAD = 5;
+const COST_PAD = 7;
 
 type SessionChoice = { name: string; value: string };
 
@@ -42,60 +48,166 @@ export async function launchTui({ version }: LaunchTuiOptions): Promise<void> {
   console.log(chalk.bold(`🧿 oracle v${version}`), dim('— Whispering your tokens to the silicon sage'));
   console.log('');
   let olderOffset = 0;
+  let showingOlder = false;
+  // Reuse a single global key handler to avoid stacking listeners across prompts
+  let globalInput: NodeJS.ReadStream | undefined;
+  const keyState = {
+    shortcutSelection: null as string | null,
+    hasOlderPrev: false,
+    hasOlderNext: false,
+    showingOlder: false,
+    olderTotal: 0,
+  };
+  let resolveShortcut: ((value: string) => void) | null = null;
+  const onKeypressGlobal = (_: unknown, key: { name?: string }): void => {
+    if (!key?.name) return;
+    if (keyState.shortcutSelection) return;
+    if (!keyState.showingOlder && keyState.olderTotal > 0 && key.name === 'pagedown') {
+      keyState.shortcutSelection = '__older__';
+      resolveShortcut?.('__older__');
+      return;
+    }
+    if (keyState.showingOlder) {
+      if (key.name === 'pagedown' && keyState.hasOlderNext) {
+        keyState.shortcutSelection = '__more__';
+        resolveShortcut?.('__more__');
+      } else if (key.name === 'pageup') {
+        keyState.shortcutSelection = keyState.hasOlderPrev ? '__prev__' : '__reset__';
+        resolveShortcut?.(keyState.shortcutSelection);
+      }
+    }
+  };
   for (;;) {
-    const { recent, older, hasMoreOlder } = await fetchSessionBuckets(olderOffset);
-    const choices: Array<SessionChoice | inquirer.Separator> = [];
-    if (recent.length > 0) {
-      choices.push(new inquirer.Separator());
-      choices.push(new inquirer.Separator('Status  Model      Mode    Timestamp           Chars  Cost  Slug'));
-      choices.push(...recent.map(toSessionChoice));
-    } else if (older.length > 0 && olderOffset === 0) {
-      choices.push(new inquirer.Separator());
-      choices.push(new inquirer.Separator('Status  Model      Mode    Timestamp           Chars  Cost  Slug'));
-      choices.push(...older.slice(0, PAGE_SIZE).map(toSessionChoice));
+    const { recent, older, olderTotal } = await fetchSessionBuckets(olderOffset);
+    type HeaderChoice = { name: string; value: string; disabled: boolean };
+    const choices: Array<SessionChoice | inquirer.Separator | HeaderChoice> = [];
+    const hasOlderPrev = olderOffset > 0;
+    const hasOlderNext = olderOffset + PAGE_SIZE < olderTotal;
+
+    const headerLabel = dim(
+      `${'Status'.padEnd(STATUS_PAD)} ${'Model'.padEnd(MODEL_PAD)} ${'Mode'.padEnd(MODE_PAD)} ${'Timestamp'.padEnd(
+        TIMESTAMP_PAD,
+      )} ${'Chars'.padStart(CHARS_PAD)} ${'Cost'.padStart(COST_PAD)}  Slug`,
+    );
+
+    // Start with a selectable row so PageUp/PageDown never land on a separator
+    choices.push({ name: chalk.bold.green('ask oracle'), value: '__ask__' });
+    choices.push(new inquirer.Separator());
+
+    if (!showingOlder) {
+      if (recent.length > 0) {
+        choices.push(new inquirer.Separator(headerLabel));
+        choices.push(...recent.map(toSessionChoice));
+      } else if (older.length > 0) {
+        // No recent entries; show first page of older.
+        choices.push(new inquirer.Separator(headerLabel));
+        choices.push(...older.slice(0, PAGE_SIZE).map(toSessionChoice));
+      }
+    } else if (older.length > 0) {
+      choices.push(new inquirer.Separator(headerLabel));
+      choices.push(...older.map(toSessionChoice));
     }
-    if (older.length > 0 && olderOffset > 0) {
-      choices.push(new inquirer.Separator());
-      choices.push(new inquirer.Separator('Status  Model      Mode    Timestamp           Chars  Cost  Slug'));
-      choices.push(...older.slice(0, PAGE_SIZE).map(toSessionChoice));
-    }
+
     choices.push(new inquirer.Separator());
     choices.push(new inquirer.Separator('Actions'));
     choices.push({ name: chalk.bold.green('ask oracle'), value: '__ask__' });
-    if (hasMoreOlder) {
-      choices.push({ name: 'Load older', value: '__more__' });
+
+    if (!showingOlder && olderTotal > 0) {
+      choices.push({ name: 'Older page', value: '__older__' });
+    } else {
+      if (hasOlderPrev) {
+        choices.push({ name: 'Page up', value: '__prev__' });
+      }
+      if (hasOlderNext) {
+        choices.push({ name: 'Page down', value: '__more__' });
+      }
+      choices.push({ name: 'Newer (recent)', value: '__reset__' });
     }
-    if (olderOffset > 0) {
-      choices.push({ name: 'Back to recent', value: '__reset__' });
-    }
+
     choices.push({ name: 'Exit', value: '__exit__' });
 
-    const { selection } = await inquirer.prompt<{ selection: string }>([
-      {
-        name: 'selection',
-        type: 'list',
-        message: 'Select a session or action',
-        choices,
-        pageSize: 16,
-      },
-    ]);
+    // Update key handler state for this prompt
+    keyState.hasOlderPrev = hasOlderPrev;
+    keyState.hasOlderNext = hasOlderNext;
+    keyState.showingOlder = showingOlder;
+    keyState.olderTotal = olderTotal;
+    keyState.shortcutSelection = null;
+
+    const selection = await new Promise<string>((resolve) => {
+      let _resolved = false;
+      const prompt = inquirer.prompt<{ selection: string }>([
+        {
+          name: 'selection',
+          type: 'list',
+          message: 'Select a session or action',
+          choices,
+          pageSize: 16,
+          loop: false,
+        },
+      ]);
+
+      const promptUi = prompt as unknown as {
+        ui?: { rl: import('readline').Interface; close: () => void };
+      };
+      const rl = promptUi.ui?.rl;
+      globalInput = (rl as unknown as { input?: NodeJS.ReadStream })?.input;
+      resolveShortcut = (value) => {
+        _resolved = true;
+        resolve(value);
+      };
+      if (globalInput) {
+        globalInput.setMaxListeners?.(0);
+        globalInput.off('keypress', onKeypressGlobal);
+        globalInput.on('keypress', onKeypressGlobal);
+      }
+
+      prompt
+        .then(({ selection: answer }) => {
+          _resolved = true;
+          resolve(keyState.shortcutSelection ?? answer);
+        })
+        .catch((error) => {
+          console.error(
+            chalk.red('Paging failed; returning to recent list.'),
+            error instanceof Error ? error.message : error,
+          );
+          _resolved = true;
+          resolve('__reset__');
+        });
+    }).finally(() => {
+      if (globalInput) {
+        globalInput.off('keypress', onKeypressGlobal);
+      }
+      resolveShortcut = null;
+    });
 
     if (selection === '__exit__') {
       console.log(chalk.green('🧿 Closing the book. See you next prompt.'));
       return;
     }
-    if (selection === '__more__') {
-      olderOffset += PAGE_SIZE;
-      continue;
-    }
-    if (selection === '__reset__') {
-      olderOffset = 0;
-      continue;
-    }
     if (selection === '__ask__') {
       await askOracleFlow(version, userConfig);
       continue;
     }
+    if (selection === '__older__') {
+      showingOlder = true;
+      olderOffset = 0;
+      continue;
+    }
+    if (selection === '__more__') {
+      olderOffset = Math.min(olderOffset + PAGE_SIZE, Math.max(0, olderTotal - PAGE_SIZE));
+      continue;
+    }
+    if (selection === '__prev__') {
+      olderOffset = Math.max(0, olderOffset - PAGE_SIZE);
+      continue;
+    }
+    if (selection === '__reset__') {
+      showingOlder = false;
+      olderOffset = 0;
+      continue;
+    }
+
     await showSessionDetail(selection);
   }
 }
@@ -104,6 +216,7 @@ async function fetchSessionBuckets(olderOffset: number): Promise<{
   recent: SessionMetadata[];
   older: SessionMetadata[];
   hasMoreOlder: boolean;
+  olderTotal: number;
 }> {
   const all = await listSessionsMetadata();
   const cutoff = Date.now() - RECENT_WINDOW_HOURS * 60 * 60 * 1000;
@@ -114,9 +227,9 @@ async function fetchSessionBuckets(olderOffset: number): Promise<{
 
   if (recent.length === 0 && older.length === 0 && olderAll.length > 0) {
     // No recent entries; fall back to top 10 overall.
-    return { recent: olderAll.slice(0, PAGE_SIZE), older: [], hasMoreOlder: olderAll.length > PAGE_SIZE };
+    return { recent: olderAll.slice(0, PAGE_SIZE), older: [], hasMoreOlder: olderAll.length > PAGE_SIZE, olderTotal: olderAll.length };
   }
-  return { recent, older, hasMoreOlder };
+  return { recent, older, hasMoreOlder, olderTotal: olderAll.length };
 }
 
 function toSessionChoice(meta: SessionMetadata): SessionChoice {
@@ -133,10 +246,12 @@ function formatSessionLabel(meta: SessionMetadata): string {
   const mode = meta.mode ?? meta.options?.mode ?? 'api';
   const slug = meta.id;
   const chars = meta.options?.prompt?.length ?? meta.promptPreview?.length ?? 0;
-  const charLabel = chars > 0 ? chalk.gray(String(chars).padStart(5)) : chalk.gray('    -');
+  const charLabel = chars > 0 ? chalk.gray(String(chars).padStart(CHARS_PAD)) : chalk.gray(`${''.padStart(CHARS_PAD - 1)}-`);
   const cost = mode === 'browser' ? null : resolveCost(meta);
-  const costLabel = cost != null ? chalk.gray(formatCostTable(cost)) : chalk.gray('      -');
-  return `${status} ${chalk.white(model.padEnd(10))} ${chalk.gray(mode.padEnd(7))} ${chalk.gray(created)} ${charLabel} ${costLabel}  ${chalk.cyan(
+  const costLabel = cost != null ? chalk.gray(formatCostTable(cost)) : chalk.gray(`${''.padStart(COST_PAD - 1)}-`);
+  return `${status} ${chalk.white(model.padEnd(MODEL_PAD))} ${chalk.gray(mode.padEnd(MODE_PAD))} ${chalk.gray(created.padEnd(
+    TIMESTAMP_PAD,
+  ))} ${charLabel} ${costLabel}  ${chalk.cyan(
     slug,
   )}`;
 }
@@ -157,7 +272,7 @@ function resolveCost(meta: SessionMetadata): number | null {
 }
 
 function formatCostTable(cost: number): string {
-  return `$${cost.toFixed(3)}`.padStart(7);
+  return `$${cost.toFixed(3)}`.padStart(COST_PAD);
 }
 
 function formatTimestampAligned(iso: string): string {
@@ -172,10 +287,12 @@ function formatTimestampAligned(iso: string): string {
     second: undefined,
     hour12: true,
   };
-  const formatted = date.toLocaleString(locale, opts);
+  let formatted = date.toLocaleString(locale, opts);
+  // Drop the comma and use double-space between date and time for alignment.
+  formatted = formatted.replace(', ', '  ');
   // Insert a leading space when hour is a single digit to align AM/PM column.
-  // Example: "11/18/2025, 1:07:05 AM" -> "11/18/2025,  1:07:05 AM"
-  return formatted.replace(/(, )(\d:)/, '$1 $2');
+  // Example: "11/18/2025  1:07 AM" -> "11/18/2025   1:07 AM"
+  return formatted.replace(/(\s)(\d:)/, '$1 $2');
 }
 
 function colorStatus(status: string): string {
@@ -411,7 +528,7 @@ async function askOracleFlow(version: string, userConfig: UserConfig): Promise<v
 
   const browserConfig: BrowserSessionConfig | undefined =
     mode === 'browser'
-      ? buildBrowserConfig({
+      ? await buildBrowserConfig({
           browserChromeProfile: answers.chromeProfile,
           browserHeadless: answers.headless,
           browserHideWindow: answers.hideWindow,

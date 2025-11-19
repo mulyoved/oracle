@@ -66,11 +66,13 @@ function renderHelpBanner(version: string, colors: HelpColors): string {
 
 function renderHelpFooter(program: Command, colors: HelpColors): string {
   const tips = [
+    `${colors.bullet('•')} Oracle cannot see your project unless you pass ${colors.accent('--file …')} — attach the files/dirs you want it to read.`,
     `${colors.bullet('•')} Attach lots of source (whole directories beat single files) and keep total input under ~196k tokens.`,
     `${colors.bullet('•')} Oracle starts empty—open with a short project briefing (stack, services, build steps), spell out the question and prior attempts, and why it matters; the more explanation and context you provide, the better the response will be.`,
+    `${colors.bullet('•')} Best results: 6–30 sentences plus key source files; very short prompts often yield generic answers.`,
     `${colors.bullet('•')} Oracle is one-shot: it does not remember prior runs, so start fresh each time with full context.`,
     `${colors.bullet('•')} Run ${colors.accent('--files-report')} to inspect token spend before hitting the API.`,
-    `${colors.bullet('•')} Non-preview runs spawn detached sessions so they keep streaming even if your terminal closes — reattach anytime via ${colors.accent('pnpm oracle session <slug>')}.`,
+    `${colors.bullet('•')} Non-preview runs spawn detached sessions (especially gpt-5-pro API). If the CLI times out, do not re-run — reattach with ${colors.accent('oracle session <slug>')} to resume/inspect the existing run.`,
     `${colors.bullet('•')} Set a memorable 3–5 word slug via ${colors.accent('--slug "<words>"')} to keep session IDs tidy.`,
     `${colors.bullet('•')} Finished sessions auto-hide preamble logs when reattached; raw timestamps remain in the saved log file.`,
     `${colors.bullet('•')} Need hidden flags? Run ${colors.accent(`${program.name()} --help --verbose`)} to list search/token/browser overrides.`,
