@@ -51,6 +51,11 @@ describe('session identifiers', () => {
     expect(id).toBe('launch-plan-qa-sync-ready');
     expect(() => sessionModule.createSessionId('ignored', 'only two')).toThrow(/Custom slug/i);
   });
+
+  test('createSessionId truncates overly long words to keep slugs readable', () => {
+    const id = sessionModule.createSessionId('abcdefghijklm nopqrstuvwxyz shorty');
+    expect(id).toBe('abcdefghij-nopqrstuvw-shorty');
+  });
 });
 
 describe('session lifecycle', () => {

@@ -163,6 +163,7 @@ const ZOMBIE_MAX_AGE_MS = 60 * 60 * 1000; // 60 minutes
 const DEFAULT_SLUG = 'session';
 const MAX_SLUG_WORDS = 5;
 const MIN_CUSTOM_SLUG_WORDS = 3;
+const MAX_SLUG_WORD_LENGTH = 10;
 
 async function ensureDir(dirPath: string): Promise<void> {
   await fs.mkdir(dirPath, { recursive: true });
@@ -175,7 +176,9 @@ export async function ensureSessionStorage(): Promise<void> {
 function slugify(text: string | undefined, maxWords = MAX_SLUG_WORDS): string {
   const normalized = text?.toLowerCase() ?? '';
   const words = normalized.match(/[a-z0-9]+/g) ?? [];
-  const trimmed = words.slice(0, maxWords);
+  const trimmed = words
+    .slice(0, maxWords)
+    .map((word) => word.slice(0, MAX_SLUG_WORD_LENGTH));
   return trimmed.length > 0 ? trimmed.join('-') : DEFAULT_SLUG;
 }
 
