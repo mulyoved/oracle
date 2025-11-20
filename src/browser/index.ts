@@ -27,6 +27,7 @@ import {
 import { uploadAttachmentViaDataTransfer } from './actions/remoteFileTransfer.js';
 import { estimateTokenCount, withRetries } from './utils.js';
 import { formatElapsed } from '../oracle/format.js';
+import { CHATGPT_URL } from './constants.js';
 
 export type { BrowserAutomationConfig, BrowserRunOptions, BrowserRunResult } from './types.js';
 export { CHATGPT_URL, DEFAULT_MODEL_TARGET } from './constants.js';
@@ -146,9 +147,17 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
       logger('Skipping Chrome cookie sync (--browser-no-cookie-sync)');
     }
 
-    await raceWithDisconnect(navigateToChatGPT(Page, Runtime, config.url, logger));
+    const baseUrl = CHATGPT_URL;
+    // First load the base ChatGPT homepage to satisfy potential interstitials,
+    // then hop to the requested URL if it differs.
+    await raceWithDisconnect(navigateToChatGPT(Page, Runtime, baseUrl, logger));
     await raceWithDisconnect(ensureNotBlocked(Runtime, config.headless, logger));
     await raceWithDisconnect(ensureLoggedIn(Runtime, logger, { appliedCookies }));
+
+    if (config.url !== baseUrl) {
+      await raceWithDisconnect(navigateToChatGPT(Page, Runtime, config.url, logger));
+      await raceWithDisconnect(ensureNotBlocked(Runtime, config.headless, logger));
+    }
     await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
     logger(`Prompt textarea ready (initial focus, ${promptText.length.toLocaleString()} chars queued)`);
     if (config.desiredModel) {
