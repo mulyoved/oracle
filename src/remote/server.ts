@@ -259,6 +259,8 @@ function formatReachableAddresses(bindAddress: string, port: number): string[] {
   if (bindAddress && bindAddress !== '::' && bindAddress !== '0.0.0.0') {
     addresses.push(`${bindAddress}:${port}`);
   }
+  const ipv4: string[] = [];
+  const ipv6: string[] = [];
   try {
     const interfaces = os.networkInterfaces();
     for (const entries of Object.values(interfaces)) {
@@ -276,9 +278,13 @@ function formatReachableAddresses(bindAddress: string, port: number): string[] {
                 ? 'IPv6'
                 : '';
         if (family === 'IPv4') {
-          addresses.push(`${iface.address}:${port}`);
+          if (iface.address.startsWith('127.')) continue;
+          if (iface.address.startsWith('169.254.')) continue; // APIPA/link-local
+          ipv4.push(`${iface.address}:${port}`);
         } else if (family === 'IPv6') {
-          addresses.push(`[${iface.address}]:${port}`);
+          const addr = iface.address.toLowerCase();
+          if (addr === '::1' || addr.startsWith('fe80:')) continue; // loopback/link-local
+          ipv6.push(`[${iface.address}]:${port}`);
         }
       }
     }
@@ -286,7 +292,7 @@ function formatReachableAddresses(bindAddress: string, port: number): string[] {
     // network interface probing can fail in locked-down environments; ignore
   }
   // de-dup
-  return Array.from(new Set(addresses));
+  return Array.from(new Set([...ipv4, ...ipv6]));
 }
 
 async function loadLocalChatgptCookies(logger: (message: string) => void, targetUrl: string): Promise<CookieParam[] | null> {
