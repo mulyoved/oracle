@@ -40,6 +40,7 @@ import { performSessionRun } from '../src/cli/sessionRunner.js';
 import type { BrowserSessionRunnerDeps } from '../src/browser/sessionRunner.js';
 import { attachSession, showStatus, formatCompletionSummary } from '../src/cli/sessionDisplay.js';
 import type { ShowStatusOptions } from '../src/cli/sessionDisplay.js';
+import { formatCompactNumber } from '../src/cli/format.js';
 import { resolveGeminiModelId } from '../src/oracle/gemini.js';
 import { handleSessionCommand, type StatusOptions, formatSessionCleanupMessage } from '../src/cli/sessionCommand.js';
 import { isErrorLogged } from '../src/cli/errorUtils.js';
@@ -770,7 +771,8 @@ async function runRootCommand(options: CliOptions): Promise<void> {
       const result = await copyToClipboard(bundle.markdown);
       if (result.success) {
         const via = result.command ? ` via ${result.command}` : '';
-        const summary = `Copied markdown to clipboard${via} (${bundle.markdown.length.toLocaleString()} chars; ~${estimatedTokens.toLocaleString()} tokens).`;
+        const lineCount = bundle.markdown.split(/\r?\n/).length;
+        const summary = `Copied markdown to clipboard${via} (${formatCompactNumber(bundle.markdown.length)} chars; ${formatCompactNumber(lineCount)} lines; ~${formatCompactNumber(estimatedTokens)} tokens).`;
         console.log(chalk.dim(summary));
       } else {
         const reason = result.error instanceof Error ? result.error.message : String(result.error ?? 'unknown error');
