@@ -11,13 +11,30 @@ describe('oracle-mcp schemas', () => {
   let transport: StdioClientTransport | null = null;
   const stderrLog: string[] = [];
   const exitLog: string[] = [];
+  const parsedMessages: unknown[] = [];
+  const parseErrors: string[] = [];
+  let stdoutRemainder = '';
 
   // Keep the daemon quiet and skip optional native deps in CI.
   process.env.ORACLE_DISABLE_KEYTAR = '1';
 
   const attachStderr = (proc: ChildProcess | undefined): void => {
     proc?.stderr?.on('data', (chunk) => stderrLog.push(String(chunk)));
-    proc?.stdout?.on('data', (chunk) => exitLog.push(`stdout: ${String(chunk)}`));
+    proc?.stdout?.on('data', (chunk) => {
+      exitLog.push(`stdout: ${String(chunk)}`);
+      stdoutRemainder += String(chunk);
+      const lines = stdoutRemainder.split('\n');
+      stdoutRemainder = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line);
+          parsedMessages.push(msg);
+        } catch (error) {
+          parseErrors.push(`parse error for line "${line}": ${String(error)}`);
+        }
+      }
+    });
     proc?.on('exit', (code, signal) => exitLog.push(`exit ${code ?? 'null'} signal ${signal ?? 'null'}`));
     proc?.on('error', (err) => exitLog.push(`error ${String(err)}`));
   };
@@ -73,5 +90,17 @@ describe('oracle-mcp schemas', () => {
         expect(schema.type).toBe('object');
       }
     }
+  });
+
+  it('emits only JSON-RPC lines on stdout during handshake', async () => {
+    // Give the transport a moment to flush handshake traffic.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(parseErrors).toHaveLength(0);
+    if (parsedMessages.length > 0) {
+      for (const msg of parsedMessages) {
+        expect((msg as { jsonrpc?: unknown }).jsonrpc).toBe('2.0');
+      }
+    }
+    expect(stdoutRemainder.trim()).toBe('');
   });
 });
