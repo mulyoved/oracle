@@ -107,7 +107,13 @@ pnpm run lint
 ```
 
 ## Docs & credits
-- Docs: `docs/browser-mode.md`, `docs/chromium-forks.md`, `docs/configuration.md`, `docs/manual-tests.md`, `docs/mcp.md`, `docs/testing/mcp-smoke.md`, `docs/tui-debug.md`.
+- `docs/browser-mode.md` — browser engine flow, cookie sync, troubleshooting.
+- `docs/chromium-forks.md` — running with Chrome forks (Chromium/Edge/Brave) and cookie DB paths.
+- `docs/configuration.md` — user/CLI config, env precedence, example `~/.oracle/config.json`.
+- `docs/manual-tests.md` — manual test checklist for releases/regressions.
+- `docs/mcp.md` — MCP server/tools, resources, and client setup.
+- `docs/testing/mcp-smoke.md` — quick MCP smoke tests.
+- `docs/tui-debug.md` — debugging tips for the TUI.
 - Sessions and tooling share `~/.oracle/sessions` across CLI and MCP.
 - MIT licensed. Maintained by @steipete. Inspired by https://ampcode.com/news/oracle.
 
