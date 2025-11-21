@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License"></a>
 </p>
 
-Oracle gives your agents a simple, reliable way to **bundle a prompt plus the right files and hand them to another AI**. It currently speaks GPT-5.1 Pro (new default), GPT-5.1 Codex (API-only), and GPT-5.1; Pro and Codex Max runs can take up to an hour and often return remarkably strong answers.
+Oracle gives your agents a simple, reliable way to **bundle a prompt plus the right files and hand them to another AI**. It currently speaks GPT-5.1 Pro (new default), GPT-5.1 Codex (API-only), and GPT-5.1; Pro runs can take up to an hour and often return remarkably strong answers.
 
 ## Two engines, one CLI
 
@@ -47,10 +47,6 @@ npx -y @steipete/oracle -p "Review the TS data layer" --file "src/**/*.ts" --fil
 # Mixed glob + single file
 npx -y @steipete/oracle -p "Audit data layer" --file "src/**/*.ts" --file README.md
 
-# Clipboard bundle (semi-manual)
-# Build the markdown bundle, print it, and copy to your clipboard in one go.
-oracle --render --copy -p "Summarize the risk register" --file docs/risk-register.md docs/risk-matrix.md
-
 # Dry-run (no API call) with summary estimate
 oracle --dry-run summary -p "Check release notes" --file docs/release-notes.md
 
@@ -80,12 +76,18 @@ Keep Chrome running on a signed-in host and drive it from another machine withou
    {
      remote: { host: "192.168.64.2:9473", token: "c4e5f9..." }
    }
-   ```
-   Env vars (`ORACLE_REMOTE_HOST`, `ORACLE_REMOTE_TOKEN`) still override the config.
+  ```
+  Env vars (`ORACLE_REMOTE_HOST`, `ORACLE_REMOTE_TOKEN`) still override the config.
 
 Notes:
 - Cookies never cross the wire; the host Chrome profile must stay signed in. If not, `oracle serve` opens chatgpt.com and exits.
 - Remote mode requires `--engine browser` (or an auto-selected browser engine). Background/detached runs are disabled so logs can stream.
+
+### Clipboard bundle (semi-manual)
+- Build the markdown bundle, print it, and copy it to your clipboard in one go:
+  ```bash
+  oracle --render --copy -p "Summarize the risk register" --file docs/risk-register.md docs/risk-matrix.md
+  ```
 
 ## How do I integrate this?
 **Recommendation:** Prefer API (default) or manual bundle/copy flows. Full browser automation is experimental (macOS + Chrome only today) and may be blocked by login/Cloudflare challenges. (for humans) - preview first.
