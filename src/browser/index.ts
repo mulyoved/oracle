@@ -1,4 +1,4 @@
-import { mkdtemp, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { resolveBrowserConfig } from './config.js';
@@ -28,6 +28,7 @@ import { uploadAttachmentViaDataTransfer } from './actions/remoteFileTransfer.js
 import { estimateTokenCount, withRetries, delay } from './utils.js';
 import { formatElapsed } from '../oracle/format.js';
 import { CHATGPT_URL } from './constants.js';
+import type { LaunchedChrome } from 'chrome-launcher';
 
 export type { BrowserAutomationConfig, BrowserRunOptions, BrowserRunResult } from './types.js';
 export { CHATGPT_URL, DEFAULT_MODEL_TARGET } from './constants.js';
@@ -84,7 +85,17 @@ export async function runBrowserMode(options: BrowserRunOptions): Promise<Browse
   }
 
   const effectiveKeepBrowser = config.keepBrowser || manualLogin;
-  const chrome = await launchChrome(config, userDataDir, logger);
+  const reusedChrome = manualLogin ? await maybeReuseRunningChrome(userDataDir, logger) : null;
+  const chrome =
+    reusedChrome ??
+    (await launchChrome(
+      {
+        ...config,
+        remoteChrome: config.remoteChrome,
+      },
+      userDataDir,
+      logger,
+    ));
   let removeTerminationHooks: (() => void) | null = null;
   try {
     removeTerminationHooks = registerTerminationHooks(chrome, userDataDir, effectiveKeepBrowser, logger);
@@ -387,6 +398,59 @@ async function waitForLogin({
     }
   }
   throw new Error('Manual login mode timed out waiting for ChatGPT session; please sign in and retry.');
+}
+
+async function maybeReuseRunningChrome(userDataDir: string, logger: BrowserLogger): Promise<LaunchedChrome | null> {
+  const port = await readDevToolsPort(userDataDir);
+  if (!port) return null;
+  const versionUrl = `http://127.0.0.1:${port}/json/version`;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    const response = await fetch(versionUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const pidPath = path.join(userDataDir, 'chrome.pid');
+    let pid: number | undefined;
+    try {
+      const rawPid = (await readFile(pidPath, 'utf8')).trim();
+      pid = Number.parseInt(rawPid, 10);
+      if (Number.isNaN(pid)) pid = undefined;
+    } catch {
+      pid = undefined;
+    }
+    logger(`Found running Chrome for ${userDataDir}; reusing (DevTools port ${port}${pid ? `, pid ${pid}` : ''})`);
+    return {
+      port,
+      pid,
+      kill: async () => {},
+      process: undefined,
+    } as unknown as LaunchedChrome;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger(`DevToolsActivePort found for ${userDataDir} but unreachable (${message}); launching new Chrome.`);
+    return null;
+  }
+}
+
+async function readDevToolsPort(userDataDir: string): Promise<number | null> {
+  const candidates = [
+    path.join(userDataDir, 'DevToolsActivePort'),
+    path.join(userDataDir, 'Default', 'DevToolsActivePort'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const raw = await readFile(candidate, 'utf8');
+      const firstLine = raw.split(/\r?\n/u)[0]?.trim();
+      const port = Number.parseInt(firstLine ?? '', 10);
+      if (Number.isFinite(port)) {
+        return port;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 async function runRemoteBrowserMode(
