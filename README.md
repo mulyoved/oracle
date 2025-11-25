@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License"></a>
 </p>
 
-Oracle bundles your prompt and files so another AI can answer with real context. It speaks GPT-5.1 Pro (default), GPT-5.1 Codex (API-only), GPT-5.1, Gemini 3 Pro, Claude Sonnet 4.5, Claude Opus 4.1, and more—and it can ask one or multiple models in a single run. Browser automation exists but is **experimental**; prefer API or `--copy` and paste into ChatGPT yourself.
+Oracle bundles your prompt and files so another AI can answer with real context. It speaks GPT-5.1 Pro (default), GPT-5.1 Codex (API-only), GPT-5.1, Gemini 3 Pro, Claude Sonnet 4.5, Claude Opus 4.1, and more—and it can ask one or multiple models in a single run. Browser automation is available; API remains the most reliable path, and `--copy` is an easy manual fallback.
 
 ## Quick start
 
@@ -30,7 +30,7 @@ npx @steipete/oracle -p "Cross-check the data layer assumptions" --models gpt-5.
 # Preview without spending tokens
 npx @steipete/oracle --dry-run summary -p "Check release notes" --file docs/release-notes.md
 
-# Experimental browser run (no API key, will open ChatGPT)
+# Browser run (no API key, will open ChatGPT)
 npx @steipete/oracle --engine browser -p "Walk through the UI smoke test" --file "src/**/*.ts"
 
 # Sessions (list and replay)
@@ -41,14 +41,14 @@ npx @steipete/oracle session <id> --render
 npx @steipete/oracle
 ```
 
-Engine auto-picks API when `OPENAI_API_KEY` is set, otherwise browser; browser is stable on macOS, works on Linux with `--browser-chrome-path/--browser-cookie-path`, and is partial/experimental on Windows.
+Engine auto-picks API when `OPENAI_API_KEY` is set, otherwise browser; browser is stable on macOS and works on Linux and Windows. On Linux pass `--browser-chrome-path/--browser-cookie-path` if detection fails; on Windows prefer `--browser-manual-login` or inline cookies if decryption is blocked.
 
 ## Integration
 
 **CLI**
 - API mode expects API keys in your environment: `OPENAI_API_KEY` (GPT-5.x), `GEMINI_API_KEY` (Gemini 3 Pro), `ANTHROPIC_API_KEY` (Claude Sonnet 4.5 / Opus 4.1).
 - Prefer API mode or `--copy` + manual paste; browser automation is experimental.
-- Browser support: stable on macOS; works on Linux with `--browser-chrome-path/--browser-cookie-path`; Windows is partial/experimental.
+- Browser support: stable on macOS; works on Linux (add `--browser-chrome-path/--browser-cookie-path` when needed) and Windows (manual-login or inline cookies recommended when app-bound cookies block decryption).
 - Remote browser service: `oracle serve` on a signed-in host; clients use `--remote-host/--remote-token`.
 - AGENTS.md/CLAUDE.md:
   ```
