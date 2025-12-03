@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - `oracle status` now uses the same session table formatting as the TUI (status/model/mode/timestamp/chars/cost/slug), keeping colors/alignment consistent across both views.
+- Browser mode now fails fast when cookie sync applies zero cookies (e.g., keytar not built on Node 25); the error includes the Chrome profile and a keytar rebuild hint so runs don’t hang “running” on a login page.
 
 ## 0.5.0 — 2025-11-25
 
